@@ -1,0 +1,57 @@
+# EcoComfort MQTT Access Control List
+# Format: [user|topic] [read|write|readwrite] topic
+
+# Default permissions for all users
+# Deny all by default
+user #
+topic deny #
+
+# EcoComfort service user permissions
+user ecocomfort
+
+# Allow system topics (broker statistics)
+topic readwrite $SYS/broker/load/+
+topic readwrite $SYS/broker/clients/+
+topic readwrite $SYS/broker/messages/+
+topic read $SYS/broker/uptime
+
+# Sensor data topics - RuuviTag sensors
+topic readwrite 112     # Temperature sensor
+topic readwrite 114     # Humidity sensor  
+topic readwrite 127     # Accelerometer sensor
+
+# Device management topics
+topic readwrite ecocomfort/devices/+/status
+topic readwrite ecocomfort/devices/+/config
+topic readwrite ecocomfort/devices/+/heartbeat
+
+# Sensor data aggregated topics
+topic readwrite ecocomfort/sensors/+/temperature
+topic readwrite ecocomfort/sensors/+/humidity
+topic readwrite ecocomfort/sensors/+/acceleration
+topic readwrite ecocomfort/sensors/+/battery
+
+# Alert and notification topics
+topic readwrite ecocomfort/alerts/+
+topic readwrite ecocomfort/notifications/+
+
+# Energy management topics
+topic readwrite ecocomfort/energy/+/consumption
+topic readwrite ecocomfort/energy/+/production
+topic readwrite ecocomfort/energy/+/optimization
+
+# Door detection topics
+topic readwrite ecocomfort/doors/+/status
+topic readwrite ecocomfort/doors/+/events
+
+# System health and diagnostics
+topic readwrite ecocomfort/system/health
+topic readwrite ecocomfort/system/diagnostics
+topic readwrite ecocomfort/system/logs
+
+# Will messages for connection monitoring
+topic readwrite ecocomfort/clients/+/will
+
+# Pattern for dynamic sensor IDs
+pattern readwrite ecocomfort/sensors/%u/+
+pattern readwrite ecocomfort/devices/%u/+
