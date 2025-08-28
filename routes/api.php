@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Broadcast;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\SensorController;
@@ -143,7 +144,7 @@ Route::get('/health', function () {
 
 // WebSocket authentication for private channels
 Route::middleware(['jwt.auth', 'api.throttle:50,1'])->post('/broadcasting/auth', function (Request $request) {
-    return response()->json(['auth' => true]);
+    return Broadcast::auth($request);
 });
 
 // MQTT webhook endpoint (rate limited for security)

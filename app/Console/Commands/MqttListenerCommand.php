@@ -82,9 +82,7 @@ class MqttListenerCommand extends Command
             // Subscribe to topics
             $mqttService->subscribe();
             $this->info('🔔 Subscribed to topics:');
-            $this->line('  - Temperature: ' . config('mqtt.topic_temperature'));
-            $this->line('  - Humidity: ' . config('mqtt.topic_humidity'));
-            $this->line('  - Accelerometer: ' . config('mqtt.topic_accelerometer'));
+            $this->line('  - RuuviTag data: pws-packet/202481601481463/+/+');
             
             $this->info('👂 Listening for messages...');
             

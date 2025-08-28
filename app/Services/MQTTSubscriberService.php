@@ -100,34 +100,67 @@ class MQTTSubscriberService
     
     public function subscribe(): void
     {
-        // Subscribe to temperature topic
+        // Subscribe to RuuviTag data topic with wildcard pattern
         $this->mqtt->subscribe(
-            config('mqtt.topic_temperature', '112'),
+            'pws-packet/202481601481463/+/+',
             function (string $topic, string $message, bool $retained, array $matchedWildcards) {
-                $this->handleTemperatureMessage($message);
+                $this->handleRuuviTagMessage($topic, $message);
             },
             0
         );
         
-        // Subscribe to humidity topic
-        $this->mqtt->subscribe(
-            config('mqtt.topic_humidity', '114'),
-            function (string $topic, string $message, bool $retained, array $matchedWildcards) {
-                $this->handleHumidityMessage($message);
-            },
-            0
-        );
-        
-        // Subscribe to accelerometer topic
-        $this->mqtt->subscribe(
-            config('mqtt.topic_accelerometer', '127'),
-            function (string $topic, string $message, bool $retained, array $matchedWildcards) {
-                $this->handleAccelerometerMessage($message);
-            },
-            0
-        );
-        
-        Log::info('MQTT subscriptions registered');
+        Log::info('MQTT subscriptions registered for RuuviTag data');
+    }
+    
+    private function handleRuuviTagMessage(string $topic, string $message): void
+    {
+        try {
+            // Parse topic: pws-packet/202481601481463/422801533/112
+            $topicParts = explode('/', $topic);
+            if (count($topicParts) !== 4 || $topicParts[0] !== 'pws-packet') {
+                return; // Skip non-RuuviTag messages
+            }
+            
+            $sourceAddress = (int)$topicParts[2];
+            $sensorTypeId = (int)$topicParts[3];
+            
+            $data = json_decode($message, true);
+            if (!$data) {
+                return;
+            }
+            
+            // Create RuuviTag format for existing handlers
+            $ruuviData = [
+                'sensor_id' => $sensorTypeId,
+                'source_address' => $sourceAddress,
+                'data' => $data
+            ];
+            
+            $ruuviMessage = json_encode($ruuviData);
+            
+            // Route to appropriate handler based on sensor type
+            switch ($sensorTypeId) {
+                case 112: // Temperature
+                    $this->handleTemperatureMessage($ruuviMessage);
+                    break;
+                case 114: // Humidity
+                    $this->handleHumidityMessage($ruuviMessage);
+                    break;
+                case 127: // Accelerometer
+                    $this->handleAccelerometerMessage($ruuviMessage);
+                    break;
+                default:
+                    // Skip unknown sensor types (116, 142, 192, 193)
+                    break;
+            }
+            
+        } catch (\Exception $e) {
+            Log::error('Error handling RuuviTag message: ' . $e->getMessage(), [
+                'topic' => $topic,
+                'message' => $message,
+                'exception' => $e
+            ]);
+        }
     }
     
     private function handleTemperatureMessage(string $message): void
@@ -141,10 +174,11 @@ class MQTTSubscriberService
                 return;
             }
             
-            // Parse RuuviTag format
+            // Parse RuuviTag format (handle nested data structure)
             $sensorId = $data['sensor_id'] ?? null;
             $sourceAddress = $data['source_address'] ?? null;
-            $temperature = $data['data']['temperature'] ?? $data['temperature'] ?? null;
+            // Handle nested data: data.data.temperature or data.temperature
+            $temperature = $data['data']['data']['temperature'] ?? $data['data']['temperature'] ?? $data['temperature'] ?? null;
             
             if (!$sensorId || !$sourceAddress || $temperature === null) {
                 Log::warning('Invalid temperature message format', ['message' => $message]);
@@ -153,12 +187,8 @@ class MQTTSubscriberService
             
             $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
             if (!$sensor) {
-                // Auto-create sensor if not exists
-                $sensor = $this->createSensorFromRuuviTag($sensorId, $sourceAddress);
-                if (!$sensor) {
-                    Log::warning('Failed to create sensor', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
-                    return;
-                }
+                Log::warning('Unknown sensor source_address - sensor must be configured first', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
             }
             
             // Calibrate temperature
@@ -205,10 +235,11 @@ class MQTTSubscriberService
                 return;
             }
             
-            // Parse RuuviTag format
+            // Parse RuuviTag format (handle nested data structure)
             $sensorId = $data['sensor_id'] ?? null;
             $sourceAddress = $data['source_address'] ?? null;
-            $humidity = $data['data']['humidity'] ?? $data['humidity'] ?? null;
+            // Handle nested data: data.data.humidity or data.humidity
+            $humidity = $data['data']['data']['humidity'] ?? $data['data']['humidity'] ?? $data['humidity'] ?? null;
             
             if (!$sensorId || !$sourceAddress || $humidity === null) {
                 Log::warning('Invalid humidity message format', ['message' => $message]);
@@ -217,12 +248,8 @@ class MQTTSubscriberService
             
             $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
             if (!$sensor) {
-                // Auto-create sensor if not exists
-                $sensor = $this->createSensorFromRuuviTag($sensorId, $sourceAddress);
-                if (!$sensor) {
-                    Log::warning('Failed to create sensor', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
-                    return;
-                }
+                Log::warning('Unknown sensor source_address - sensor must be configured first', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
             }
             
             // Calibrate humidity
@@ -264,10 +291,11 @@ class MQTTSubscriberService
                 return;
             }
             
-            // Parse RuuviTag format
+            // Parse RuuviTag format (handle nested data structure)
             $sensorId = $data['sensor_id'] ?? null;
             $sourceAddress = $data['source_address'] ?? null;
-            $accelerometerData = $data['data'] ?? [];
+            // Handle nested accelerometer data: data.data or data
+            $accelerometerData = $data['data']['data'] ?? $data['data'] ?? [];
             
             if (!$sensorId || !$sourceAddress || empty($accelerometerData)) {
                 Log::warning('Invalid accelerometer message format', ['message' => $message]);
@@ -276,12 +304,8 @@ class MQTTSubscriberService
             
             $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
             if (!$sensor) {
-                // Auto-create sensor if not exists
-                $sensor = $this->createSensorFromRuuviTag($sensorId, $sourceAddress);
-                if (!$sensor) {
-                    Log::warning('Failed to create sensor', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
-                    return;
-                }
+                Log::warning('Unknown sensor source_address - sensor must be configured first', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
             }
             
             // Get or create sensor data record
@@ -299,7 +323,7 @@ class MQTTSubscriberService
             }
             
             // Detect door state using Kalman filter
-            $doorState = $this->doorDetectionService->detectDoorState(
+            $doorDetection = $this->doorDetectionService->detectDoorState(
                 $sensorData->acceleration_x,
                 $sensorData->acceleration_y,
                 $sensorData->acceleration_z,
@@ -307,10 +331,27 @@ class MQTTSubscriberService
             );
             
             $previousDoorState = $sensorData->door_state;
-            $sensorData->door_state = $doorState;
+            
+            // Extract boolean value from detection result
+            if (is_array($doorDetection) && isset($doorDetection['door_state'])) {
+                $sensorData->door_state = $doorDetection['door_state'] === 'opened';
+                
+                // Log detailed detection info for debugging
+                Log::info('Door detection result', [
+                    'sensor_id' => $sensor->id,
+                    'state' => $doorDetection['door_state'],
+                    'confidence' => $doorDetection['confidence'] ?? null,
+                    'angle' => $doorDetection['angle'] ?? null,
+                    'magnitude' => $doorDetection['magnitude'] ?? null,
+                    'accel' => ['x' => $sensorData->acceleration_x, 'y' => $sensorData->acceleration_y, 'z' => $sensorData->acceleration_z]
+                ]);
+            } else {
+                // Fallback: simple boolean detection
+                $sensorData->door_state = (bool) $doorDetection;
+            }
             
             // Calculate energy loss if door is open
-            if ($doorState && $sensorData->temperature !== null) {
+            if ($sensorData->door_state && $sensorData->temperature !== null) {
                 $outdoorTemp = $this->getOutdoorTemperature();
                 $sensorData->energy_loss_watts = $this->energyCalculatorService->calculateEnergyLoss(
                     $sensorData->temperature,
@@ -356,11 +397,11 @@ class MQTTSubscriberService
     
     private function getSensorBySourceAddress(int $sourceAddress, int $sensorId): ?Sensor
     {
+        // Find sensor by source_address only (ignore sensor_id since one RuuviTag = multiple internal sensors)
         return Cache::remember(
-            "sensor_source_{$sourceAddress}_{$sensorId}",
+            "sensor_source_{$sourceAddress}",
             now()->addHours(1),
             fn() => Sensor::where('source_address', $sourceAddress)
-                ->where('sensor_type_id', $sensorId)
                 ->first()
         );
     }
@@ -444,13 +485,15 @@ class MQTTSubscriberService
     
     private function getOrCreateSensorData(string $sensorId): SensorData
     {
-        // Try to get recent sensor data (within last minute)
+        // Try to get recent sensor data (within last 5 minutes to allow RuuviTag sensor aggregation)
         $recentData = SensorData::where('sensor_id', $sensorId)
-            ->where('timestamp', '>=', now()->subMinute())
+            ->where('timestamp', '>=', now()->subMinutes(5))
             ->orderBy('timestamp', 'desc')
             ->first();
         
         if ($recentData) {
+            // Update timestamp to keep data fresh
+            $recentData->timestamp = now();
             return $recentData;
         }
         
@@ -950,7 +993,57 @@ class MQTTSubscriberService
     
     public function listen(): void
     {
-        $this->mqtt->loop(true);
+        try {
+            // Use non-blocking loop to prevent socket timeouts
+            $this->mqtt->loop(false, true);
+        } catch (\Exception $e) {
+            Log::error('MQTT loop error: ' . $e->getMessage());
+            
+            // Try to reconnect if socket failed
+            if (str_contains($e->getMessage(), 'socket failed') || str_contains($e->getMessage(), 'closed')) {
+                Log::info('Attempting MQTT reconnection...');
+                try {
+                    $this->reconnect();
+                } catch (\Exception $reconnectError) {
+                    Log::error('MQTT reconnection failed: ' . $reconnectError->getMessage());
+                    throw $reconnectError;
+                }
+            } else {
+                throw $e;
+            }
+        }
+    }
+    
+    private function reconnect(): void
+    {
+        try {
+            // Disconnect first
+            if ($this->mqtt) {
+                try {
+                    $this->mqtt->disconnect();
+                } catch (\Exception $e) {
+                    // Ignore disconnect errors
+                }
+            }
+            
+            // Wait a bit before reconnecting
+            sleep(2);
+            
+            // Reinitialize MQTT client
+            $this->initializeMqttClient();
+            
+            // Reconnect
+            $this->connect();
+            
+            // Resubscribe to topics
+            $this->subscribe();
+            
+            Log::info('🔄 MQTT reconnected successfully');
+            
+        } catch (\Exception $e) {
+            Log::error('MQTT reconnection failed: ' . $e->getMessage());
+            throw $e;
+        }
     }
     
     public function disconnect(): void

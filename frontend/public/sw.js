@@ -128,12 +128,17 @@ async function handleApiRequest(request) {
     // Try network first
     const networkResponse = await fetch(request)
     
-    if (networkResponse.ok) {
-      // Cache successful responses with TTL
+    if (networkResponse.ok && request.method === 'GET') {
+      // Only cache GET requests
       const responseClone = networkResponse.clone()
       const responseWithTimestamp = await addTimestampToResponse(responseClone)
       cache.put(request, responseWithTimestamp)
       
+      return networkResponse
+    }
+    
+    // Return response for POST/PUT/DELETE without caching
+    if (networkResponse.ok) {
       return networkResponse
     }
     
