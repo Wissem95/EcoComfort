@@ -130,7 +130,7 @@ class DashboardController extends Controller
             "sensor_data_{$organization->id}",
             now()->addMinutes(1),
             function () use ($organization) {
-                $sensors = Sensor::with(['room.building', 'latestData'])
+                $sensors = Sensor::with(['room.building', 'latestData', 'latestUsableData'])
                     ->whereIn('room_id', 
                         Room::whereIn('building_id', $organization->buildings->pluck('id'))->pluck('id')
                     )
@@ -138,7 +138,8 @@ class DashboardController extends Controller
                     ->get();
 
                 return $sensors->map(function ($sensor) {
-                    $data = $sensor->latestData;
+                    // Use latest data if available, otherwise fall back to latest usable data
+                    $data = $sensor->latestData ?: $sensor->latestUsableData;
                     
                     return [
                         'sensor_id' => $sensor->id,
@@ -151,6 +152,7 @@ class DashboardController extends Controller
                         ],
                         'battery_level' => $sensor->battery_level,
                         'is_online' => $sensor->isOnline(),
+                        'has_usable_data' => $sensor->hasUsableData(),
                         'last_seen' => $sensor->last_seen_at?->toISOString(),
                         'data' => $data ? [
                             'timestamp' => $data->timestamp->toISOString(),

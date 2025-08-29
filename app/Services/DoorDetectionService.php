@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Log;
 
 class DoorDetectionService
 {
+    
     // Kalman filter parameters
     private array $kalmanStates = [];
     private const PROCESS_NOISE = 0.01;

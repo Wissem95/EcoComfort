@@ -57,6 +57,16 @@ class Sensor extends Model
         return $this->hasOne(SensorData::class)->latestOfMany('timestamp');
     }
     
+    /**
+     * Get the latest usable data (within last 24h for MQTT retained messages)
+     */
+    public function latestUsableData(): HasOne
+    {
+        return $this->hasOne(SensorData::class)
+            ->where('timestamp', '>=', now()->subDay())
+            ->latestOfMany('timestamp');
+    }
+    
     public function updateLastSeen(): void
     {
         $this->update(['last_seen_at' => now()]);
@@ -94,6 +104,25 @@ class Sensor extends Model
     public function isOnline(): bool
     {
         return $this->last_seen_at && $this->last_seen_at->diffInMinutes(now()) < 10;
+    }
+    
+    /**
+     * Check if sensor has usable data (for MQTT retained messages)
+     * Uses a longer timeframe to account for Wirepas sensor delays
+     */
+    public function hasUsableData(): bool
+    {
+        // For Wirepas sensors, use longer timeframe and check for actual data
+        if ($this->last_seen_at && $this->last_seen_at->diffInHours(now()) < 24) {
+            return true;
+        }
+        
+        // Also check if we have recent sensor data (even if last_seen_at is old)
+        $recentData = $this->sensorData()
+            ->where('timestamp', '>=', now()->subDay())
+            ->exists();
+            
+        return $recentData;
     }
     
     public function getCalibrationValue(string $key, $default = null)

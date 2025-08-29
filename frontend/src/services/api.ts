@@ -48,6 +48,7 @@ interface SensorInfo {
   };
   battery_level: number;
   is_online: boolean;
+  has_usable_data: boolean;
   last_seen: string | null;
   data: SensorData | null;
 }
@@ -142,6 +143,17 @@ class ApiService {
         ...options,
         headers,
       });
+
+      // Handle authentication errors
+      if (response.status === 401) {
+        console.warn('Token expired or invalid, clearing authentication...');
+        this.clearAuthToken();
+        
+        // Dispatch custom event to notify the app
+        window.dispatchEvent(new CustomEvent('auth:token-expired'));
+        
+        throw new Error(`Authentication failed: ${response.status} ${response.statusText}`);
+      }
 
       if (!response.ok) {
         throw new Error(`API Error: ${response.status} ${response.statusText}`);
@@ -320,6 +332,123 @@ class ApiService {
     } catch {
       return false;
     }
+  }
+
+  // Calibration methods
+  async getCalibrationStatus(sensorId: string): Promise<{
+    success: boolean;
+    sensor_id: string;
+    calibrated: boolean;
+    current_values?: {
+      x: number;
+      y: number;
+      z: number;
+    } | null;
+    message?: string;
+  }> {
+    return this.makeRequest<any>(`/sensors/${sensorId}/calibration`);
+  }
+
+  async checkSensorStability(sensorId: string): Promise<{
+    stable: boolean;
+    current_values?: {
+      x: number;
+      y: number;
+      z: number;
+    } | null;
+    stability_metrics?: {
+      variance_x: number;
+      variance_y: number;
+      variance_z: number;
+      overall_stability: number;
+      sample_count: number;
+      observation_period: number;
+    };
+    ready_for_calibration: boolean;
+    reason?: string;
+  }> {
+    return this.makeRequest<any>(`/sensors/${sensorId}/stability`);
+  }
+
+  async calibrateDoorPosition(sensorId: string, options: {
+    type: 'closed_position';
+    confirm: boolean;
+    override_existing?: boolean;
+  } = { type: 'closed_position', confirm: true }): Promise<{
+    success: boolean;
+    message: string;
+    calibration?: {
+      closed_reference: {
+        x: number;
+        y: number;
+        z: number;
+      };
+      confidence: number;
+      data_stability: number;
+      timestamp: string;
+    };
+    previous_calibration?: {
+      exists: boolean;
+      previous_position: any;
+    };
+    error?: string;
+  }> {
+    return this.makeRequest<any>(`/sensors/${sensorId}/calibrate/door`, {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  async resetCalibration(sensorId: string, reason?: string): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const body = reason ? JSON.stringify({ reason }) : undefined;
+    return this.makeRequest<any>(`/sensors/${sensorId}/calibration`, {
+      method: 'DELETE',
+      body,
+    });
+  }
+
+  async validatePosition(sensorId: string): Promise<any> {
+    return this.makeRequest<any>(`/sensors/${sensorId}/validate-position`, {
+      method: 'POST',
+    });
+  }
+
+  async getCalibrationHistory(sensorId: string, params: {
+    limit?: number;
+    from?: string;
+    to?: string;
+  } = {}): Promise<{
+    success: boolean;
+    sensor_id: string;
+    history: Array<{
+      id: number;
+      type: string;
+      closed_reference: any;
+      confidence: number;
+      calibrated_at: string;
+      calibrated_by: {
+        id: number;
+        name: string;
+      };
+      replaced_previous: boolean;
+    }>;
+    pagination: {
+      current_page: number;
+      total_pages: number;
+      total_records: number;
+    };
+  }> {
+    const queryParams = new URLSearchParams();
+    
+    if (params.limit) queryParams.append('limit', params.limit.toString());
+    if (params.from) queryParams.append('from', params.from);
+    if (params.to) queryParams.append('to', params.to);
+
+    const endpoint = `/sensors/${sensorId}/calibration/history${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+    return this.makeRequest<any>(endpoint);
   }
 }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout'
 import AuthWrapper from './components/AuthWrapper'
@@ -24,9 +24,39 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [loading, setLoading] = useState(true)
 
+  const handleLogout = useCallback(() => {
+    // Clear authentication
+    apiService.clearAuthToken()
+    localStorage.removeItem('auth_token')
+    localStorage.removeItem('user_data')
+    
+    // Reset state
+    setIsAuthenticated(false)
+    setCurrentUser(null)
+    setGamification(null)
+    setIsConnected(false)
+    
+    // Disconnect WebSocket
+    webSocketService.disconnect()
+    
+    console.log('User logged out successfully')
+  }, [])
+
   useEffect(() => {
     initializeApp()
-  }, [])
+
+    // Listen for token expiration events
+    const handleTokenExpired = () => {
+      console.warn('Token expired, logging out user...')
+      handleLogout()
+    }
+
+    window.addEventListener('auth:token-expired', handleTokenExpired)
+
+    return () => {
+      window.removeEventListener('auth:token-expired', handleTokenExpired)
+    }
+  }, [handleLogout])
 
   const initializeApp = async () => {
     try {
@@ -132,6 +162,7 @@ function App() {
     initializeApp()
   }
 
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 flex items-center justify-center">
@@ -166,6 +197,7 @@ function App() {
         isConnected={isConnected}
         userPoints={currentUser.points}
         userLevel={currentUser.level}
+        onLogout={handleLogout}
       >
         <Routes>
           <Route 

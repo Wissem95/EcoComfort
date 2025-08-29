@@ -15,7 +15,8 @@ import {
   Zap,
   Moon,
   Sun,
-  Shield
+  Shield,
+  LogOut
 } from 'lucide-react'
 
 interface NavigationProps {
@@ -25,6 +26,7 @@ interface NavigationProps {
   darkMode: boolean
   onToggleDarkMode: () => void
   unreadNotifications?: number
+  onLogout?: () => void
 }
 
 const Navigation = ({ 
@@ -33,7 +35,8 @@ const Navigation = ({
   userLevel, 
   darkMode, 
   onToggleDarkMode,
-  unreadNotifications = 0 
+  unreadNotifications = 0,
+  onLogout 
 }: NavigationProps) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const location = useLocation()
@@ -146,6 +149,15 @@ const Navigation = ({
             >
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                className="glass-button-danger py-2 px-3 text-sm flex items-center justify-center gap-2"
+                title="Se déconnecter"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       </aside>
@@ -220,13 +232,27 @@ const Navigation = ({
                   </div>
                 </div>
                 
-                <button
-                  onClick={onToggleDarkMode}
-                  className="w-full glass-button-primary py-2 flex items-center justify-center gap-2"
-                >
-                  {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-                  {darkMode ? 'Mode Clair' : 'Mode Sombre'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={onToggleDarkMode}
+                    className="flex-1 glass-button-primary py-2 flex items-center justify-center gap-2"
+                  >
+                    {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                    {darkMode ? 'Mode Clair' : 'Mode Sombre'}
+                  </button>
+                  {onLogout && (
+                    <button
+                      onClick={() => {
+                        setIsMobileMenuOpen(false)
+                        onLogout()
+                      }}
+                      className="glass-button-danger py-2 px-4 flex items-center justify-center gap-2"
+                      title="Se déconnecter"
+                    >
+                      <LogOut className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               </div>
             </nav>
           </div>

@@ -8,13 +8,15 @@ interface LayoutProps {
   isConnected: boolean
   userPoints: number
   userLevel: number
+  onLogout?: () => void
 }
 
 const Layout = ({ 
   children, 
   isConnected, 
   userPoints, 
-  userLevel
+  userLevel,
+  onLogout
 }: LayoutProps) => {
   const [darkMode, setDarkMode] = useState(true)
   const [unreadNotifications] = useState(0)
@@ -50,6 +52,7 @@ const Layout = ({
         darkMode={darkMode}
         onToggleDarkMode={toggleDarkMode}
         unreadNotifications={unreadNotifications}
+        onLogout={onLogout}
       />
       
       {/* Main Content */}

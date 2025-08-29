@@ -43,6 +43,7 @@ export interface Sensor {
   battery_level: number;
   is_active: boolean;
   is_online: boolean;
+  has_usable_data: boolean;
   last_seen_at?: string;
   room: Room;
   latest_data?: SensorData;

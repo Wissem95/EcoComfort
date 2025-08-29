@@ -10,13 +10,15 @@ import {
   TrendingUp,
   Trophy,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  Settings
 } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import webSocketService from '../services/websocket'
 import useApiData from '../hooks/useApiData'
 import Gamification from '../components/Gamification'
 import NegotiationSystem from '../components/NegotiationSystem'
+import CalibrationModal from '../components/CalibrationModal'
 import type { SensorData, GamificationLevel } from '../types'
 
 interface DashboardProps {
@@ -48,6 +50,15 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
     energy_loss: number
     door_state: boolean
   }>>([])
+
+  // Calibration modal state
+  const [calibrationModal, setCalibrationModal] = useState<{
+    isOpen: boolean
+    sensor: any | null
+  }>({
+    isOpen: false,
+    sensor: null
+  })
 
   // Generate chart data from energy analytics
   useEffect(() => {
@@ -159,8 +170,23 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
     return 'text-green-400'
   }
 
+  // Calibration modal functions
+  const openCalibrationModal = (sensor: any) => {
+    setCalibrationModal({
+      isOpen: true,
+      sensor
+    })
+  }
+
+  const closeCalibrationModal = () => {
+    setCalibrationModal({
+      isOpen: false,
+      sensor: null
+    })
+  }
+
   // Use real data from APIs
-  const totalEnergyLoss = energyAnalytics?.total_energy_loss_kwh * 1000 || energyData.reduce((sum, point) => sum + point.energy_loss, 0)
+  const totalEnergyLoss = (energyAnalytics?.total_energy_loss_kwh || 0) * 1000 || energyData.reduce((sum, point) => sum + point.energy_loss, 0)
   const averageTemperature = sensors.length > 0 
     ? sensors.filter(s => s.data?.temperature).reduce((sum, s) => sum + (s.data?.temperature || 0), 0) / sensors.filter(s => s.data?.temperature).length || 22
     : energyData.length > 0 ? energyData.reduce((sum, point) => sum + point.temperature, 0) / energyData.length : 22
@@ -319,14 +345,21 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
         
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {sensors.length > 0 ? sensors.map((sensor) => (
-            <div key={sensor.sensor_id} className={`glass-card-hover p-4 ${!sensor.is_online ? 'opacity-60' : ''}`}>
+            <div key={sensor.sensor_id} className={`glass-card-hover p-4 ${!sensor.has_usable_data ? 'opacity-60' : ''}`}>
               <div className="flex items-start justify-between mb-3">
-                <div>
+                <div className="flex-1">
                   <h4 className="font-semibold text-white">{sensor.name}</h4>
                   <p className="text-sm text-white/70">{sensor.room.name}</p>
                   <p className="text-xs text-white/50">{sensor.room.building_name}</p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => openCalibrationModal(sensor)}
+                    className="p-1.5 bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/30 text-blue-300 rounded-md transition-colors group"
+                    title="Calibrer le capteur"
+                  >
+                    <Settings className="w-3.5 h-3.5 group-hover:rotate-45 transition-transform duration-200" />
+                  </button>
                   <div className={`w-2 h-2 rounded-full ${sensor.is_online ? 'bg-green-400' : 'bg-red-400'}`} />
                   <span className={`text-xs font-medium ${getBatteryColor(sensor.battery_level)}`}>
                     {sensor.battery_level}%
@@ -403,6 +436,13 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
 
       {/* Negotiation System */}
       <NegotiationSystem />
+
+      {/* Calibration Modal */}
+      <CalibrationModal 
+        isOpen={calibrationModal.isOpen}
+        onClose={closeCalibrationModal}
+        sensor={calibrationModal.sensor}
+      />
     </div>
   )
 }

@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\SensorController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\GamificationController;
 use App\Http\Controllers\Api\AdminController;
+use App\Http\Controllers\Api\CalibrationController;
 
 /*
 |--------------------------------------------------------------------------
@@ -70,6 +71,14 @@ Route::middleware(['jwt.auth'])->prefix('sensors')->group(function () {
         Route::delete('/{sensorId}', [SensorController::class, 'destroy']);
         Route::post('/{sensorId}/calibrate', [SensorController::class, 'calibrate']);
         Route::post('/{sensorId}/reset-detection', [SensorController::class, 'resetDetection']);
+        
+        // Calibration management routes (Wirepas door position)
+        Route::get('/{sensorId}/calibration', [CalibrationController::class, 'getCalibration']);
+        Route::post('/{sensorId}/calibrate/door', [CalibrationController::class, 'calibrateDoor']);
+        Route::get('/{sensorId}/stability', [CalibrationController::class, 'getStability']);
+        Route::get('/{sensorId}/calibration/history', [CalibrationController::class, 'getHistory']);
+        Route::delete('/{sensorId}/calibration', [CalibrationController::class, 'resetCalibration']);
+        Route::post('/{sensorId}/validate-position', [CalibrationController::class, 'validatePosition']);
     });
 });
 
@@ -122,6 +131,9 @@ Route::middleware(['jwt.auth', 'api.throttle:100,1'])->prefix('admin')->group(fu
     Route::post('/sensors', [AdminController::class, 'createSensor']);
     Route::put('/sensors/{id}', [AdminController::class, 'updateSensor']);
     Route::delete('/sensors/{id}', [AdminController::class, 'deleteSensor']);
+    
+    // Calibration metrics (Admin only)
+    Route::get('/calibration/metrics', [CalibrationController::class, 'getMetrics']);
 });
 
 // Health check and system status

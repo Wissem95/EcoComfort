@@ -4,9 +4,11 @@ namespace App\Services;
 
 use App\Models\Sensor;
 use App\Models\SensorData;
+use App\Models\SensorEvent;
 use App\Models\Organization;
 use App\Models\Building;
 use App\Models\Room;
+use App\Events\DoorStateDetected;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use PhpMqtt\Client\MqttClient;
@@ -22,15 +24,18 @@ class MQTTSubscriberService
     private DoorDetectionService $doorDetectionService;
     private EnergyCalculatorService $energyCalculatorService;
     private NotificationService $notificationService;
+    private CalibrationService $calibrationService;
     
     public function __construct(
         DoorDetectionService $doorDetectionService,
         EnergyCalculatorService $energyCalculatorService,
-        NotificationService $notificationService
+        NotificationService $notificationService,
+        CalibrationService $calibrationService
     ) {
         $this->doorDetectionService = $doorDetectionService;
         $this->energyCalculatorService = $energyCalculatorService;
         $this->notificationService = $notificationService;
+        $this->calibrationService = $calibrationService;
         
         $this->initializeMqttClient();
     }
@@ -140,17 +145,33 @@ class MQTTSubscriberService
             
             // Route to appropriate handler based on sensor type
             switch ($sensorTypeId) {
-                case 112: // Temperature
+                case 112: // Temperature data
                     $this->handleTemperatureMessage($ruuviMessage);
                     break;
-                case 114: // Humidity
+                case 114: // Humidity data
                     $this->handleHumidityMessage($ruuviMessage);
                     break;
-                case 127: // Accelerometer
-                    $this->handleAccelerometerMessage($ruuviMessage);
+                case 116: // Atmospheric pressure data
+                    $this->handlePressureMessage(json_encode($ruuviData));
+                    break;
+                case 127: // Accelerometer data (start-moving, stop-moving)
+                    $this->handleWirepasMovementMessage($data);
+                    break;
+                case 142: // Battery voltage data
+                    $this->handleBatteryMessage(json_encode($data));
+                    break;
+                case 192: // Unknown sensor type (log for debugging)
+                    Log::info('Wirepas sensor type 192 detected', ['data' => $data]);
+                    break;
+                case 193: // Neighbors data
+                    $this->handleNeighborsMessage(json_encode($data));
                     break;
                 default:
-                    // Skip unknown sensor types (116, 142, 192, 193)
+                    // Log unknown sensor types for debugging
+                    Log::debug('Unknown Wirepas sensor type', [
+                        'sensor_type_id' => $sensorTypeId,
+                        'topic' => $topic
+                    ]);
                     break;
             }
             
@@ -1050,5 +1071,364 @@ class MQTTSubscriberService
     {
         $this->mqtt->disconnect();
         Log::info('MQTT disconnected');
+    }
+
+    /**
+     * Handle Wirepas diagnostic messages (sensor_id 112)
+     * Contains temperature, humidity, pressure, etc.
+     */
+    private function handleDiagnosticMessage(array $data): void
+    {
+        try {
+            $sourceAddress = $data['source_address'] ?? null;
+            $sensorId = $data['sensor_id'] ?? null;
+            $diagnosticData = $data['data'] ?? [];
+
+            if (!$sourceAddress || !$sensorId) {
+                Log::warning('Invalid diagnostic message format', ['data' => $data]);
+                return;
+            }
+
+            $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
+            if (!$sensor) {
+                Log::warning('Unknown sensor for diagnostic data', [
+                    'source_address' => $sourceAddress,
+                    'sensor_id' => $sensorId
+                ]);
+                return;
+            }
+
+            // Debug: Log the full data structure to understand the format
+            Log::debug('Diagnostic message received', [
+                'full_data' => $data,
+                'diagnostic_data' => $diagnosticData,
+                'source_address' => $sourceAddress,
+                'sensor_id' => $sensorId
+            ]);
+
+            // Store diagnostic data in SensorData
+            $sensorData = $this->getOrCreateSensorData($sensor->id);
+
+            // Handle different data structures (Wirepas format)
+            $temperature = $diagnosticData['temperature'] ?? null;
+            $humidity = $diagnosticData['humidity'] ?? null;
+            
+            if ($temperature !== null) {
+                $sensorData->temperature = $temperature;
+                Log::info("Temperature data stored", ['sensor_id' => $sensor->id, 'temperature' => $temperature]);
+            }
+            if ($humidity !== null) {
+                $sensorData->humidity = $humidity;
+                Log::info("Humidity data stored", ['sensor_id' => $sensor->id, 'humidity' => $humidity]);
+            }
+            if (isset($diagnosticData['pressure'])) {
+                $sensorData->pressure = $diagnosticData['pressure'];
+            }
+            if (isset($diagnosticData['battery_voltage'])) {
+                $sensorData->battery_voltage = $diagnosticData['battery_voltage'];
+            }
+            if (isset($diagnosticData['rssi'])) {
+                $sensorData->rssi = $diagnosticData['rssi'];
+            }
+
+            // Store acceleration data for calibration reference
+            if (isset($diagnosticData['acceleration_x'], $diagnosticData['acceleration_y'], $diagnosticData['acceleration_z'])) {
+                $sensorData->acceleration_x = $diagnosticData['acceleration_x'];
+                $sensorData->acceleration_y = $diagnosticData['acceleration_y'];
+                $sensorData->acceleration_z = $diagnosticData['acceleration_z'];
+            }
+
+            $sensorData->save();
+            
+            // Update sensor last seen
+            $sensor->updateLastSeen();
+
+            Log::debug('Processed diagnostic data', [
+                'sensor_id' => $sensor->id,
+                'temperature' => $diagnosticData['temperature'] ?? null,
+                'humidity' => $diagnosticData['humidity'] ?? null
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error handling diagnostic message: ' . $e->getMessage(), [
+                'data' => $data,
+                'exception' => $e
+            ]);
+        }
+    }
+
+    /**
+     * Handle Wirepas movement messages (sensor_id 127)
+     * Contains start-moving and stop-moving events with positions
+     */
+    private function handleWirepasMovementMessage(array $data): void
+    {
+        try {
+            $sourceAddress = $data['source_address'] ?? null;
+            $sensorId = $data['sensor_id'] ?? null;
+            $txTimeMs = $data['tx_time_ms_epoch'] ?? null;
+            $eventId = $data['event_id'] ?? null;
+            $movementData = $data['data'] ?? [];
+
+            if (!$sourceAddress || !$sensorId || !$txTimeMs || !$eventId) {
+                Log::warning('Invalid movement message format', ['data' => $data]);
+                return;
+            }
+
+            $state = $movementData['state'] ?? null;
+            $positionX = $movementData['x_axis'] ?? null;
+            $positionY = $movementData['y_axis'] ?? null;
+            $positionZ = $movementData['z_axis'] ?? null;
+
+            if (!$state || $positionX === null || $positionY === null || $positionZ === null) {
+                Log::warning('Missing movement data fields', ['data' => $data]);
+                return;
+            }
+
+            $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
+            if (!$sensor) {
+                Log::warning('Unknown sensor for movement data', [
+                    'source_address' => $sourceAddress,
+                    'sensor_id' => $sensorId
+                ]);
+                return;
+            }
+
+            // Store movement event in database
+            SensorEvent::create([
+                'sensor_id' => $sensor->id,
+                'event_type' => $state, // 'start-moving' or 'stop-moving'
+                'position_x' => $positionX,
+                'position_y' => $positionY,
+                'position_z' => $positionZ,
+                'move_duration' => $movementData['move_duration'] ?? null,
+                'move_number' => $movementData['move_number'] ?? null,
+                'tx_time_ms_epoch' => $txTimeMs,
+                'event_id' => $eventId
+            ]);
+
+            // Process the movement event
+            $this->processMovementEvent($sensor, $state, [
+                'x' => $positionX,
+                'y' => $positionY,
+                'z' => $positionZ
+            ], $txTimeMs, $movementData);
+
+            Log::info('Wirepas movement event processed', [
+                'sensor_id' => $sensor->id,
+                'state' => $state,
+                'position' => ['x' => $positionX, 'y' => $positionY, 'z' => $positionZ]
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error handling movement message: ' . $e->getMessage(), [
+                'data' => $data,
+                'exception' => $e
+            ]);
+        }
+    }
+
+    /**
+     * Process movement events according to Wirepas specs
+     * Handles the 60-70 second delay logic between start-moving and stop-moving
+     */
+    private function processMovementEvent(Sensor $sensor, string $state, array $position, int $txTimeMs, array $movementData): void
+    {
+        try {
+            // Detect door state directly from accelerometer position on every movement event
+            $doorDetection = $this->doorDetectionService->detectDoorState(
+                $position['x'] / 64.0, // Normalize from Wirepas scale to g-force
+                $position['y'] / 64.0,
+                $position['z'] / 64.0,
+                $sensor->id
+            );
+            
+            $doorState = $doorDetection['door_state'] === 'opened' ? 'open' : 'closed';
+            $confidence = $doorDetection['confidence'] / 100.0; // Convert percentage to decimal
+            
+            // Store the door state in sensor event
+            $sensorEvent = SensorEvent::where('sensor_id', $sensor->id)
+                ->where('event_type', $state)
+                ->where('tx_time_ms_epoch', $txTimeMs)
+                ->first();
+            
+            if ($sensorEvent) {
+                $sensorEvent->door_state = $doorState;
+                $sensorEvent->save();
+            }
+            
+            // Calculate energy impact if door is open
+            $energyImpact = null;
+            if ($doorState === 'open') {
+                // TODO: Integrate with EnergyCalculatorService
+                $energyImpact = [
+                    'loss_rate_watts' => 15.5, // Placeholder
+                    'estimated_cost_per_hour' => 0.0027 // Placeholder
+                ];
+            }
+            
+            // Broadcast door state detected event immediately
+            broadcast(new DoorStateDetected(
+                $sensor->id,
+                $doorState,
+                $position,
+                $confidence,
+                $energyImpact
+            ));
+            
+            Log::info("Door state detected for sensor {$sensor->id}", [
+                'state' => $doorState,
+                'position' => $position,
+                'confidence' => $confidence,
+                'angle' => $doorDetection['angle'] ?? 'N/A',
+                'processing_time_ms' => $doorDetection['processing_time_ms'] ?? 'N/A',
+                'raw_accel' => [
+                    'x' => $position['x'] / 64.0,
+                    'y' => $position['y'] / 64.0, 
+                    'z' => $position['z'] / 64.0
+                ]
+            ]);
+            
+            // Legacy behavior for compatibility (cache management)
+            $cacheKey = "sensor_moving_{$sensor->id}";
+            if ($state === 'start-moving') {
+                Cache::put($cacheKey, [
+                    'start_time' => $txTimeMs,
+                    'start_position' => $position,
+                    'door_state' => $doorState,
+                    'confidence' => $confidence
+                ], 120);
+            } elseif ($state === 'stop-moving') {
+                Cache::forget($cacheKey);
+            }
+
+        } catch (\Exception $e) {
+            Log::error('Error processing movement event: ' . $e->getMessage(), [
+                'sensor_id' => $sensor->id,
+                'state' => $state,
+                'position' => $position,
+                'exception' => $e
+            ]);
+        }
+    }
+    
+    /**
+     * Handle atmospheric pressure messages (sensor type 116)
+     */
+    private function handlePressureMessage(string $message): void
+    {
+        try {
+            $data = json_decode($message, true);
+            $sensorId = $data['sensor_id'] ?? null;
+            $sourceAddress = $data['source_address'] ?? null;
+            $pressure = $data['data']['atmospheric_pressure'] ?? $data['data']['pressure'] ?? $data['pressure'] ?? null;
+            
+            if (!$sensorId || !$sourceAddress || $pressure === null) {
+                Log::warning('Invalid pressure message format', ['message' => $message]);
+                return;
+            }
+            
+            $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
+            if (!$sensor) {
+                Log::warning('Unknown sensor for pressure data', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
+            }
+            
+            // For now, just log pressure data (not stored in current schema)
+            Log::info('Pressure data received', [
+                'sensor_id' => $sensor->id,
+                'pressure' => $pressure,
+                'hpa' => $pressure
+            ]);
+            
+            $sensor->updateLastSeen();
+            
+        } catch (\Exception $e) {
+            Log::error('Error handling pressure message: ' . $e->getMessage(), [
+                'message' => $message,
+                'exception' => $e
+            ]);
+        }
+    }
+    
+    /**
+     * Handle battery voltage messages (sensor type 142)
+     */
+    private function handleBatteryMessage(string $message): void
+    {
+        try {
+            $data = json_decode($message, true);
+            $sensorId = $data['sensor_id'] ?? null;
+            $sourceAddress = $data['source_address'] ?? null;
+            $voltage = $data['data']['voltage'] ?? $data['voltage'] ?? null;
+            
+            if (!$sensorId || !$sourceAddress || $voltage === null) {
+                Log::warning('Invalid battery message format', ['message' => $message]);
+                return;
+            }
+            
+            $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
+            if (!$sensor) {
+                Log::warning('Unknown sensor for battery data', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
+            }
+            
+            // Convert voltage to battery percentage (rough estimation)
+            $batteryLevel = min(100, max(0, ($voltage - 1.6) / (3.6 - 1.6) * 100));
+            
+            $sensor->updateBatteryLevel((int)round($batteryLevel));
+            $sensor->updateLastSeen();
+            
+            Log::info('Battery level updated', [
+                'sensor_id' => $sensor->id,
+                'voltage' => $voltage,
+                'battery_level' => $batteryLevel
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('Error handling battery message: ' . $e->getMessage(), [
+                'message' => $message,
+                'exception' => $e
+            ]);
+        }
+    }
+    
+    /**
+     * Handle neighbors data messages (sensor type 193)
+     */
+    private function handleNeighborsMessage(string $message): void
+    {
+        try {
+            $data = json_decode($message, true);
+            $sensorId = $data['sensor_id'] ?? null;
+            $sourceAddress = $data['source_address'] ?? null;
+            $neighbors = $data['data']['neighbors'] ?? $data['neighbors'] ?? null;
+            
+            if (!$sensorId || !$sourceAddress) {
+                Log::warning('Invalid neighbors message format', ['message' => $message]);
+                return;
+            }
+            
+            $sensor = $this->getSensorBySourceAddress($sourceAddress, $sensorId);
+            if (!$sensor) {
+                Log::warning('Unknown sensor for neighbors data', ['sensor_id' => $sensorId, 'source_address' => $sourceAddress]);
+                return;
+            }
+            
+            // For now, just log neighbors data (could be used for network topology)
+            Log::info('Neighbors data received', [
+                'sensor_id' => $sensor->id,
+                'neighbors_count' => is_array($neighbors) ? count($neighbors) : 0,
+                'neighbors' => $neighbors
+            ]);
+            
+            $sensor->updateLastSeen();
+            
+        } catch (\Exception $e) {
+            Log::error('Error handling neighbors message: ' . $e->getMessage(), [
+                'message' => $message,
+                'exception' => $e
+            ]);
+        }
     }
 }
