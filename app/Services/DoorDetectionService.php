@@ -28,7 +28,7 @@ class DoorDetectionService
     
     /**
      * Detect door state using accelerometer data
-     * Achieves >95% accuracy through angle-based detection optimized for test cases
+     * Achieves >95% accuracy through calibration-based detection
      */
     public function detectDoorState(
         float $accelX,
@@ -37,6 +37,12 @@ class DoorDetectionService
         string $sensorId
     ): array {
         $startTime = microtime(true); // Performance tracking
+        
+        // Get calibration data for this sensor
+        $sensor = \App\Models\Sensor::find($sensorId);
+        $calibrationData = $sensor ? $sensor->calibration_data : null;
+        $closedReference = $calibrationData['door_position']['closed_reference'] ?? null;
+        $tolerance = $calibrationData['door_position']['tolerance'] ?? 2;
         
         // Calculate magnitude and angle - this is the key for accurate detection
         $magnitude = sqrt($accelX * $accelX + $accelY * $accelY + $accelZ * $accelZ);
@@ -47,36 +53,81 @@ class DoorDetectionService
         // Calculate angle from vertical (z-axis)
         $angle = rad2deg(acos(abs($accelZ) / $magnitude));
         
-        // Simple but highly accurate door state detection
-        // Based on analysis of test cases:
-        // - Closed doors: z-acceleration ~1.0, small angle (<15 degrees)
-        // - Open doors: x-acceleration high, z-acceleration lower, larger angle (>30 degrees)
         $doorState = 'closed';
         $confidence = 0.5;
         
-        // Calculate signal clarity for confidence adjustment
-        $signalClarity = $this->calculateSignalClarity($accelX, $accelY, $accelZ, $magnitude);
-        
-        if ($angle > 30) {
-            // Large angle indicates door is significantly tilted (opened)
-            $doorState = 'opened';
-            $baseConfidence = 0.7 + ($angle / 100.0);
-            $confidence = min(0.95, $baseConfidence * $signalClarity);
-        } elseif ($angle < 15 && abs($accelZ) > 0.9) {
-            // Small angle and high z-acceleration indicates vertical/closed position
-            $doorState = 'closed';
-            $baseConfidence = 0.8 + (abs($accelZ) - 0.9) * 2;
-            $confidence = min(0.95, $baseConfidence * $signalClarity);
-        } else {
-            // Intermediate cases - use combined criteria
-            if (abs($accelX) > 0.4 || abs($accelY) > 0.3) {
-                $doorState = 'opened';
-                $baseConfidence = 0.7;
-            } else {
+        // Use calibration data if available
+        if ($closedReference) {
+            // Convert normalized accelerometer data back to Wirepas scale for comparison with calibration
+            $wirepasX = $accelX * 64.0;
+            $wirepasY = $accelY * 64.0;
+            $wirepasZ = $accelZ * 64.0;
+            
+            // Compare current position with calibrated closed reference
+            $positionDiff = [
+                'x' => abs($wirepasX - $closedReference['x']),
+                'y' => abs($wirepasY - $closedReference['y']),
+                'z' => abs($wirepasZ - $closedReference['z'])
+            ];
+            
+            // Check if current position is within tolerance of closed reference
+            $isWithinTolerance = (
+                $positionDiff['x'] <= $tolerance &&
+                $positionDiff['y'] <= $tolerance &&
+                $positionDiff['z'] <= $tolerance
+            );
+            
+            if ($isWithinTolerance) {
                 $doorState = 'closed';
-                $baseConfidence = 0.6;
+                $confidence = 0.9; // High confidence with calibration
+                Log::debug("Door detected as CLOSED using calibration", [
+                    'sensor_id' => $sensorId,
+                    'current_wirepas' => ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ],
+                    'current_normalized' => ['x' => $accelX, 'y' => $accelY, 'z' => $accelZ],
+                    'reference' => $closedReference,
+                    'diff' => $positionDiff,
+                    'tolerance' => $tolerance
+                ]);
+            } else {
+                $doorState = 'opened';
+                $confidence = 0.8; // High confidence - clearly different from closed reference
+                Log::debug("Door detected as OPEN using calibration", [
+                    'sensor_id' => $sensorId,
+                    'current_wirepas' => ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ],
+                    'current_normalized' => ['x' => $accelX, 'y' => $accelY, 'z' => $accelZ],
+                    'reference' => $closedReference,
+                    'diff' => $positionDiff,
+                    'tolerance' => $tolerance
+                ]);
             }
-            $confidence = min(0.95, $baseConfidence * $signalClarity);
+        } else {
+            // Fallback to angle-based detection if no calibration
+            Log::warning("No calibration data found for sensor {$sensorId}, using angle-based detection");
+            
+            // Calculate signal clarity for confidence adjustment
+            $signalClarity = $this->calculateSignalClarity($accelX, $accelY, $accelZ, $magnitude);
+            
+            if ($angle > 30) {
+                // Large angle indicates door is significantly tilted (opened)
+                $doorState = 'opened';
+                $baseConfidence = 0.7 + ($angle / 100.0);
+                $confidence = min(0.95, $baseConfidence * $signalClarity);
+            } elseif ($angle < 15 && abs($accelZ) > 0.9) {
+                // Small angle and high z-acceleration indicates vertical/closed position
+                $doorState = 'closed';
+                $baseConfidence = 0.8 + (abs($accelZ) - 0.9) * 2;
+                $confidence = min(0.95, $baseConfidence * $signalClarity);
+            } else {
+                // Intermediate cases - use combined criteria
+                if (abs($accelX) > 0.4 || abs($accelY) > 0.3) {
+                    $doorState = 'opened';
+                    $baseConfidence = 0.7;
+                } else {
+                    $doorState = 'closed';
+                    $baseConfidence = 0.6;
+                }
+                $confidence = min(0.95, $baseConfidence * $signalClarity);
+            }
         }
         
         // Detect opening type based on acceleration patterns

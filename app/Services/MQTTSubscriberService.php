@@ -1257,6 +1257,17 @@ class MQTTSubscriberService
                 $sensorEvent->save();
             }
             
+            // IMPORTANT: Also update SensorData with door state (for frontend display)
+            $sensorData = $this->getOrCreateSensorData($sensor->id);
+            $sensorData->door_state = ($doorState === 'open');
+            $sensorData->save();
+            
+            Log::info("Door state updated in SensorData", [
+                'sensor_id' => $sensor->id,
+                'door_state' => $doorState,
+                'boolean_value' => ($doorState === 'open')
+            ]);
+            
             // Calculate energy impact if door is open
             $energyImpact = null;
             if ($doorState === 'open') {
@@ -1275,6 +1286,9 @@ class MQTTSubscriberService
                 $confidence,
                 $energyImpact
             ));
+            
+            // Also broadcast sensor update for frontend
+            $this->broadcastSensorUpdate($sensor, $sensorData);
             
             Log::info("Door state detected for sensor {$sensor->id}", [
                 'state' => $doorState,
