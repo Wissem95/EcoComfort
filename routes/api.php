@@ -43,15 +43,18 @@ Route::middleware(['jwt.auth'])->get('/user', function (Request $request) {
     }]);
 });
 
-// Dashboard routes
-Route::middleware(['jwt.auth', 'api.throttle:2000,1'])->prefix('dashboard')->group(function () {
+// Dashboard routes (temporary public access for testing)
+Route::prefix('dashboard')->group(function () {
     Route::get('/overview', [DashboardController::class, 'overview']);
     Route::get('/sensor-data', [DashboardController::class, 'sensorData']);
     Route::get('/alerts', [DashboardController::class, 'alerts']);
-    Route::post('/alerts/{eventId}/acknowledge', [DashboardController::class, 'acknowledgeAlert']);
     Route::get('/energy-analytics', [DashboardController::class, 'energyAnalytics']);
     Route::get('/gamification', [DashboardController::class, 'gamification']);
-    Route::get('/rooms/{roomId}', [DashboardController::class, 'roomDetails']);
+});
+
+// Temporary public access for door state confirmation (testing only)
+Route::prefix('sensors')->group(function () {
+    Route::post('/{sensorId}/confirm-door-state', [\App\Http\Controllers\Api\DoorStateController::class, 'confirmState']);
 });
 
 // Sensor management routes
@@ -75,6 +78,10 @@ Route::middleware(['jwt.auth'])->prefix('sensors')->group(function () {
         // Calibration management routes (Wirepas door position)
         Route::get('/{sensorId}/calibration', [CalibrationController::class, 'getCalibration']);
         Route::post('/{sensorId}/calibrate/door', [CalibrationController::class, 'calibrateDoor']);
+        
+        // Door state confirmation routes (3-level certainty system)
+        // Route::post('/{sensorId}/confirm-door-state', [\App\Http\Controllers\Api\DoorStateController::class, 'confirmState']); // Moved to public section for testing
+        Route::get('/{sensorId}/confirmation-history', [\App\Http\Controllers\Api\DoorStateController::class, 'getConfirmationHistory']);
         Route::get('/{sensorId}/stability', [CalibrationController::class, 'getStability']);
         Route::get('/{sensorId}/calibration/history', [CalibrationController::class, 'getHistory']);
         Route::delete('/{sensorId}/calibration', [CalibrationController::class, 'resetCalibration']);

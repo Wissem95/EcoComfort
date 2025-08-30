@@ -5,7 +5,9 @@ import type {
   SensorDataResponse, 
   AlertsResponse, 
   EnergyAnalytics,
-  SensorInfo 
+  SensorInfo,
+  EventsResponse,
+  EventData 
 } from '../services/api';
 
 interface UseApiDataReturn {
@@ -14,24 +16,28 @@ interface UseApiDataReturn {
   sensors: SensorInfo[];
   alerts: AlertsResponse | null;
   energyAnalytics: EnergyAnalytics | null;
+  events: EventsResponse | null;
   
   // Loading states
   overviewLoading: boolean;
   sensorsLoading: boolean;
   alertsLoading: boolean;
   energyLoading: boolean;
+  eventsLoading: boolean;
   
   // Error states
   overviewError: string | null;
   sensorsError: string | null;
   alertsError: string | null;
   energyError: string | null;
+  eventsError: string | null;
   
   // Actions
   refreshOverview: () => Promise<void>;
   refreshSensors: () => Promise<void>;
   refreshAlerts: () => Promise<void>;
   refreshEnergyAnalytics: (days?: number) => Promise<void>;
+  refreshEvents: (params?: any) => Promise<void>;
   refreshAll: () => Promise<void>;
   
   // Utility
@@ -45,18 +51,21 @@ export const useApiData = (): UseApiDataReturn => {
   const [sensors, setSensors] = useState<SensorInfo[]>([]);
   const [alerts, setAlerts] = useState<AlertsResponse | null>(null);
   const [energyAnalytics, setEnergyAnalytics] = useState<EnergyAnalytics | null>(null);
+  const [events, setEvents] = useState<EventsResponse | null>(null);
 
   // Loading states
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [sensorsLoading, setSensorsLoading] = useState(false);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [energyLoading, setEnergyLoading] = useState(false);
+  const [eventsLoading, setEventsLoading] = useState(false);
 
   // Error states
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [sensorsError, setSensorsError] = useState<string | null>(null);
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [energyError, setEnergyError] = useState<string | null>(null);
+  const [eventsError, setEventsError] = useState<string | null>(null);
 
   // Refresh functions
   const refreshOverview = useCallback(async () => {
@@ -116,6 +125,30 @@ export const useApiData = (): UseApiDataReturn => {
     }
   }, []);
 
+  const refreshEvents = useCallback(async (params: {
+    page?: number;
+    limit?: number;
+    severity?: 'info' | 'warning' | 'critical';
+    type?: string;
+    acknowledged?: boolean;
+    room_id?: string;
+    sensor_id?: string;
+    start_date?: string;
+    end_date?: string;
+  } = {}) => {
+    try {
+      setEventsLoading(true);
+      setEventsError(null);
+      const data = await apiService.getEvents(params);
+      setEvents(data);
+    } catch (error) {
+      console.error('Failed to fetch events:', error);
+      setEventsError(error instanceof Error ? error.message : 'Failed to fetch events');
+    } finally {
+      setEventsLoading(false);
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     await Promise.all([
       refreshOverview(),
@@ -149,8 +182,8 @@ export const useApiData = (): UseApiDataReturn => {
   }, [refreshOverview]);
 
   // Computed states
-  const isAnyLoading = overviewLoading || sensorsLoading || alertsLoading || energyLoading;
-  const hasAnyError = !!(overviewError || sensorsError || alertsError || energyError);
+  const isAnyLoading = overviewLoading || sensorsLoading || alertsLoading || energyLoading || eventsLoading;
+  const hasAnyError = !!(overviewError || sensorsError || alertsError || energyError || eventsError);
 
   return {
     // Data
@@ -158,24 +191,28 @@ export const useApiData = (): UseApiDataReturn => {
     sensors,
     alerts,
     energyAnalytics,
+    events,
     
     // Loading states
     overviewLoading,
     sensorsLoading,
     alertsLoading,
     energyLoading,
+    eventsLoading,
     
     // Error states
     overviewError,
     sensorsError,
     alertsError,
     energyError,
+    eventsError,
     
     // Actions
     refreshOverview,
     refreshSensors,
     refreshAlerts,
     refreshEnergyAnalytics,
+    refreshEvents,
     refreshAll,
     
     // Utility

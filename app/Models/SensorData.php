@@ -24,6 +24,10 @@ class SensorData extends Model
         'acceleration_z',
         'door_state',
         'energy_loss_watts',
+        'cumulative_energy_kwh',
+        'door_open_since',
+        'energy_cost_euros',
+        'door_open_duration_seconds',
     ];
     
     protected $casts = [
@@ -35,6 +39,10 @@ class SensorData extends Model
         'acceleration_z' => 'decimal:4',
         'door_state' => 'boolean',
         'energy_loss_watts' => 'decimal:2',
+        'cumulative_energy_kwh' => 'decimal:3',
+        'door_open_since' => 'datetime',
+        'energy_cost_euros' => 'decimal:2',
+        'door_open_duration_seconds' => 'integer',
     ];
     
     public function sensor(): BelongsTo
@@ -80,5 +88,42 @@ class SensorData extends Model
         return self::where('sensor_id', $sensorId)
             ->orderBy('timestamp', 'desc')
             ->first();
+    }
+    
+    /**
+     * Get real-time cumulative energy loss
+     */
+    public function getCurrentCumulativeEnergy(): float
+    {
+        if (!$this->isDoorOpen() || !$this->door_open_since || !$this->energy_loss_watts) {
+            return (float) $this->cumulative_energy_kwh;
+        }
+        
+        // Calculate real-time cumulative energy
+        $durationHours = $this->door_open_since->diffInMinutes(now()) / 60;
+        $additionalEnergyKwh = ($this->energy_loss_watts / 1000) * $durationHours;
+        
+        return (float) $this->cumulative_energy_kwh + $additionalEnergyKwh;
+    }
+    
+    /**
+     * Get real-time cumulative cost
+     */
+    public function getCurrentCumulativeCost(): float
+    {
+        $currentEnergyKwh = $this->getCurrentCumulativeEnergy();
+        return $currentEnergyKwh * 0.1740; // EDF tariff
+    }
+    
+    /**
+     * Get current door open duration in seconds
+     */
+    public function getCurrentDoorOpenDuration(): int
+    {
+        if (!$this->isDoorOpen() || !$this->door_open_since) {
+            return $this->door_open_duration_seconds ?? 0;
+        }
+        
+        return $this->door_open_since->diffInSeconds(now()) + ($this->door_open_duration_seconds ?? 0);
     }
 }

@@ -9,6 +9,7 @@ use App\Models\Organization;
 use App\Models\Building;
 use App\Models\Room;
 use App\Events\DoorStateDetected;
+use App\Events\DoorStateCertaintyChanged;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use PhpMqtt\Client\MqttClient;
@@ -344,10 +345,11 @@ class MQTTSubscriberService
             }
             
             // Detect door state using Kalman filter
+            // Normalize Wirepas accelerometer data to g-force (-1 to 1 range)
             $doorDetection = $this->doorDetectionService->detectDoorState(
-                $sensorData->acceleration_x,
-                $sensorData->acceleration_y,
-                $sensorData->acceleration_z,
+                $sensorData->acceleration_x / 64.0,
+                $sensorData->acceleration_y / 64.0,
+                $sensorData->acceleration_z / 64.0,
                 $sensor->id
             );
             
@@ -356,6 +358,7 @@ class MQTTSubscriberService
             // Extract boolean value from detection result
             if (is_array($doorDetection) && isset($doorDetection['door_state'])) {
                 $sensorData->door_state = $doorDetection['door_state'] === 'opened';
+                $doorState = $sensorData->door_state; // Define doorState for comparison
                 
                 // Log detailed detection info for debugging
                 Log::info('Door detection result', [
@@ -369,6 +372,7 @@ class MQTTSubscriberService
             } else {
                 // Fallback: simple boolean detection
                 $sensorData->door_state = (bool) $doorDetection;
+                $doorState = $sensorData->door_state; // Define doorState for comparison
             }
             
             // Calculate energy loss if door is open
@@ -518,10 +522,31 @@ class MQTTSubscriberService
             return $recentData;
         }
         
-        // Create new sensor data record
+        // Get the latest known non-null values to preserve data continuity
+        $lastTemperature = SensorData::where('sensor_id', $sensorId)
+            ->whereNotNull('temperature')
+            ->orderBy('timestamp', 'desc')
+            ->value('temperature');
+            
+        $lastHumidity = SensorData::where('sensor_id', $sensorId)
+            ->whereNotNull('humidity')
+            ->orderBy('timestamp', 'desc')
+            ->value('humidity');
+            
+        $lastData = SensorData::where('sensor_id', $sensorId)
+            ->orderBy('timestamp', 'desc')
+            ->first();
+        
+        // Create new sensor data record with last known values
         return SensorData::create([
             'sensor_id' => $sensorId,
             'timestamp' => now(),
+            'temperature' => $lastTemperature,
+            'humidity' => $lastHumidity,
+            'acceleration_x' => $lastData?->acceleration_x,
+            'acceleration_y' => $lastData?->acceleration_y,
+            'acceleration_z' => $lastData?->acceleration_z,
+            'door_state' => $lastData?->door_state,
         ]);
     }
     
@@ -567,8 +592,19 @@ class MQTTSubscriberService
         // For now, return a default value
         return Cache::remember('outdoor_temperature', now()->addHours(1), function () {
             // TODO: Implement weather API integration
-            return 10.0; // Default outdoor temperature
+            return 12.0; // Default outdoor temperature - updated to match documentation
         });
+    }
+    
+    private function getLatestTemperatureForSensor(Sensor $sensor): ?float
+    {
+        // Get the most recent temperature reading for this sensor
+        $latestSensorData = SensorData::where('sensor_id', $sensor->id)
+            ->whereNotNull('temperature')
+            ->orderBy('timestamp', 'desc')
+            ->first();
+            
+        return $latestSensorData?->temperature;
     }
     
     private function broadcastSensorUpdate(Sensor $sensor, SensorData $data): void
@@ -1235,85 +1271,303 @@ class MQTTSubscriberService
     private function processMovementEvent(Sensor $sensor, string $state, array $position, int $txTimeMs, array $movementData): void
     {
         try {
-            // Detect door state directly from accelerometer position on every movement event
-            $doorDetection = $this->doorDetectionService->detectDoorState(
-                $position['x'] / 64.0, // Normalize from Wirepas scale to g-force
-                $position['y'] / 64.0,
-                $position['z'] / 64.0,
-                $sensor->id
-            );
-            
-            $doorState = $doorDetection['door_state'] === 'opened' ? 'open' : 'closed';
-            $confidence = $doorDetection['confidence'] / 100.0; // Convert percentage to decimal
-            
-            // Store the door state in sensor event
-            $sensorEvent = SensorEvent::where('sensor_id', $sensor->id)
-                ->where('event_type', $state)
-                ->where('tx_time_ms_epoch', $txTimeMs)
-                ->first();
-            
-            if ($sensorEvent) {
-                $sensorEvent->door_state = $doorState;
-                $sensorEvent->save();
-            }
-            
-            // IMPORTANT: Also update SensorData with door state (for frontend display)
-            $sensorData = $this->getOrCreateSensorData($sensor->id);
-            $sensorData->door_state = ($doorState === 'open');
-            $sensorData->save();
-            
-            Log::info("Door state updated in SensorData", [
-                'sensor_id' => $sensor->id,
-                'door_state' => $doorState,
-                'boolean_value' => ($doorState === 'open')
-            ]);
-            
-            // Calculate energy impact if door is open
-            $energyImpact = null;
-            if ($doorState === 'open') {
-                // TODO: Integrate with EnergyCalculatorService
-                $energyImpact = [
-                    'loss_rate_watts' => 15.5, // Placeholder
-                    'estimated_cost_per_hour' => 0.0027 // Placeholder
-                ];
-            }
-            
-            // Broadcast door state detected event immediately
-            broadcast(new DoorStateDetected(
-                $sensor->id,
-                $doorState,
-                $position,
-                $confidence,
-                $energyImpact
-            ));
-            
-            // Also broadcast sensor update for frontend
-            $this->broadcastSensorUpdate($sensor, $sensorData);
-            
-            Log::info("Door state detected for sensor {$sensor->id}", [
-                'state' => $doorState,
-                'position' => $position,
-                'confidence' => $confidence,
-                'angle' => $doorDetection['angle'] ?? 'N/A',
-                'processing_time_ms' => $doorDetection['processing_time_ms'] ?? 'N/A',
-                'raw_accel' => [
-                    'x' => $position['x'] / 64.0,
-                    'y' => $position['y'] / 64.0, 
-                    'z' => $position['z'] / 64.0
-                ]
-            ]);
-            
-            // Legacy behavior for compatibility (cache management)
             $cacheKey = "sensor_moving_{$sensor->id}";
+            $doorDetection = null;
+            $doorState = null;
+            $certainty = 'UNCERTAIN';
+            $needsConfirmation = false;
+            
             if ($state === 'start-moving') {
+                // Cache la position de départ pour contexte
                 Cache::put($cacheKey, [
-                    'start_time' => $txTimeMs,
                     'start_position' => $position,
-                    'door_state' => $doorState,
-                    'confidence' => $confidence
+                    'start_time' => $txTimeMs
                 ], 120);
+                
+                Log::info("Movement started for sensor {$sensor->id}, setting state to EN_MOUVEMENT...", [
+                    'position' => $position,
+                    'expected_in' => '60-70 seconds'
+                ]);
+                
+                // Met l'état EN_MOUVEMENT (conservateur)
+                SensorData::where('sensor_id', $sensor->id)
+                    ->where('timestamp', '>=', now()->subMinutes(5))
+                    ->orderBy('timestamp', 'desc')
+                    ->limit(1)
+                    ->update([
+                        'door_state' => true, // Conservative: assume opened for energy calculation
+                        'door_state_certainty' => 'UNCERTAIN',
+                        'needs_confirmation' => false
+                    ]);
+                
+                Log::info("Door state set to EN_MOUVEMENT", [
+                    'sensor_id' => $sensor->id,
+                    'conservative_state' => 'opened_for_energy_calc'
+                ]);
+                
+                // Pas de return - on continue le traitement
+                
             } elseif ($state === 'stop-moving') {
+                // Récupère la position de départ pour contexte
+                $movementCache = Cache::get($cacheKey);
+                $startPosition = $movementCache['start_position'] ?? null;
+                
+                // Détection de porte sur position finale
+                $doorDetection = $this->doorDetectionService->detectDoorState(
+                    $position['x'] / 64.0, // Normalize from Wirepas scale to g-force
+                    $position['y'] / 64.0,
+                    $position['z'] / 64.0,
+                    $sensor->id,
+                    $startPosition // Pass start position for enhanced detection
+                );
+                
+                $doorState = $doorDetection['door_state'];
+                $certainty = $doorDetection['certainty'];
+                $needsConfirmation = $doorDetection['needs_confirmation'];
+                
+                // Log movement context for debugging
+                if ($startPosition) {
+                    Log::debug("Movement completed with context", [
+                        'sensor_id' => $sensor->id,
+                        'start_position' => $startPosition,
+                        'stop_position' => $position,
+                        'movement_delta' => [
+                            'x' => $position['x'] - $startPosition['x'],
+                            'y' => $position['y'] - $startPosition['y'], 
+                            'z' => $position['z'] - $startPosition['z']
+                        ]
+                    ]);
+                }
+                
+                // Nettoie le cache après stop-moving
                 Cache::forget($cacheKey);
+                
+            } elseif ($state === 'stationary') {
+                // État stationnaire (toutes les 10 min) - Vérification/auto-correction
+                Log::debug("Stationary state detected, performing verification", [
+                    'sensor_id' => $sensor->id,
+                    'position' => $position
+                ]);
+                
+                // Faire une détection pour vérifier l'état actuel (auto-correction)
+                $doorDetection = $this->doorDetectionService->detectDoorState(
+                    $position['x'] / 64.0, 
+                    $position['y'] / 64.0,
+                    $position['z'] / 64.0,
+                    $sensor->id
+                );
+                
+                $doorState = $doorDetection['door_state'];
+                $certainty = $doorDetection['certainty'];
+                $needsConfirmation = $doorDetection['needs_confirmation'];
+                
+                Log::info("Stationary verification completed", [
+                    'sensor_id' => $sensor->id,
+                    'verified_state' => $doorState,
+                    'certainty' => $certainty
+                ]);
+                
+            } elseif ($state === 'moving') {
+                // Mouvement prolongé (10+ min) - Marquer comme incertain
+                Log::warning("Prolonged movement detected, marking as uncertain", [
+                    'sensor_id' => $sensor->id,
+                    'position' => $position
+                ]);
+                
+                // Marquer comme incertain et demander confirmation
+                $doorState = 'uncertain';
+                $certainty = 'UNCERTAIN';
+                $needsConfirmation = true;
+                
+                // Mettre à jour immédiatement pour signaler l'anomalie
+                SensorData::where('sensor_id', $sensor->id)
+                    ->where('timestamp', '>=', now()->subMinutes(5))
+                    ->orderBy('timestamp', 'desc')
+                    ->limit(1)
+                    ->update([
+                        'door_state_certainty' => 'UNCERTAIN',
+                        'needs_confirmation' => true
+                    ]);
+                    
+                Log::info("Prolonged movement marked as uncertain", [
+                    'sensor_id' => $sensor->id,
+                    'requires_user_confirmation' => true
+                ]);
+            }
+            
+            // Traitement des données pour stop-moving ET stationary (quand on a une détection)
+            if (($state === 'stop-moving' || $state === 'stationary') && $doorDetection) {
+                $confidence = $doorDetection['confidence'] / 100.0; // Convert percentage to decimal
+                
+                // Convert door state to boolean for database
+                $doorStateBoolean = match($doorState) {
+                    'closed' => false,
+                    'opened', 'probably_opened' => true,
+                    default => true // Conservative: assume opened if unknown
+                };
+                
+                // Debug the new 3-level logic
+                Log::info("Door state detection with 3-level certainty", [
+                    'sensor_id' => $sensor->id,
+                    'detection_result' => $doorState,
+                    'certainty' => $certainty,
+                    'needs_confirmation' => $needsConfirmation,
+                    'confidence' => $doorDetection['confidence'],
+                    'boolean_for_db' => $doorStateBoolean
+                ]);
+                
+                // Store the door state in sensor event
+                $sensorEvent = SensorEvent::where('sensor_id', $sensor->id)
+                    ->where('event_type', $state)
+                    ->where('tx_time_ms_epoch', $txTimeMs)
+                    ->first();
+                
+                if ($sensorEvent) {
+                    $sensorEvent->door_state = $doorState;
+                    $sensorEvent->save();
+                }
+                
+                // Get previous state before update
+                $previousSensorData = SensorData::where('sensor_id', $sensor->id)
+                    ->where('timestamp', '>=', now()->subMinutes(5))
+                    ->orderBy('timestamp', 'desc')
+                    ->first();
+                    
+                $previousState = [
+                    'door_state' => $previousSensorData ? ($previousSensorData->door_state ? 'opened' : 'closed') : 'unknown',
+                    'certainty' => $previousSensorData->door_state_certainty ?? 'UNCERTAIN',
+                    'needs_confirmation' => $previousSensorData->needs_confirmation ?? false
+                ];
+                
+                // IMPORTANT: Update SensorData with new certainty logic
+                SensorData::where('sensor_id', $sensor->id)
+                    ->where('timestamp', '>=', now()->subMinutes(5))
+                    ->orderBy('timestamp', 'desc')
+                    ->limit(1)
+                    ->update([
+                        'door_state' => $doorStateBoolean,
+                        'door_state_certainty' => $certainty,
+                        'needs_confirmation' => $needsConfirmation
+                    ]);
+                
+                Log::info("Door state updated with 3-level certainty", [
+                    'sensor_id' => $sensor->id,
+                    'door_state' => $doorState,
+                    'certainty' => $certainty,
+                    'needs_confirmation' => $needsConfirmation,
+                    'boolean_value' => $doorStateBoolean
+                ]);
+                
+                // Get updated sensor data for event broadcasting
+                $updatedSensorData = SensorData::where('sensor_id', $sensor->id)
+                    ->where('timestamp', '>=', now()->subMinutes(5))
+                    ->orderBy('timestamp', 'desc')
+                    ->first();
+                
+                // Broadcast certainty change event if state or certainty changed
+                if ($updatedSensorData && (
+                    $previousState['door_state'] !== $doorState || 
+                    $previousState['certainty'] !== $certainty ||
+                    $previousState['needs_confirmation'] !== $needsConfirmation
+                )) {
+                    try {
+                        broadcast(new DoorStateCertaintyChanged($updatedSensorData, $previousState, 'detection'));
+                    } catch (\Exception $e) {
+                        Log::warning("Failed to broadcast DoorStateCertaintyChanged event: " . $e->getMessage());
+                    }
+                }
+                
+                // Calculate energy impact if door is open
+                $energyImpact = null;
+                if ($doorState === 'opened' && $updatedSensorData) {
+                    // Get latest temperature for this sensor
+                    $latestTemp = $this->getLatestTemperatureForSensor($sensor);
+                    
+                    if ($latestTemp !== null && $sensor->room) {
+                        $outdoorTemp = $this->getOutdoorTemperature();
+                        
+                        // Use EcoComfort specification formula
+                        $energyCalc = $this->energyCalculatorService->calculateEnergyLossEcoComfort(
+                            $latestTemp,
+                            $outdoorTemp,
+                            $sensor->room->surface_m2,
+                            'door'
+                        );
+                        
+                        $energyImpact = [
+                            'loss_rate_watts' => $energyCalc['energy_loss_watts'],
+                            'estimated_cost_per_hour' => $energyCalc['cost_impact_euro_per_hour']
+                        ];
+                        
+                        // Update the sensor data with energy loss and start cumulative tracking
+                        $this->updateEnergyCumulative(
+                            $updatedSensorData, 
+                            $energyCalc['energy_loss_watts'], 
+                            'opened',
+                            $previousState['door_state'] ?? 'unknown'
+                        );
+                        
+                        Log::info("Energy loss calculated for opened door", [
+                            'sensor_id' => $sensor->id,
+                            'indoor_temp' => $latestTemp,
+                            'outdoor_temp' => $outdoorTemp,
+                            'surface_m2' => $sensor->room->surface_m2,
+                            'energy_loss_watts' => $energyCalc['energy_loss_watts'],
+                            'cost_per_hour' => $energyCalc['cost_impact_euro_per_hour']
+                        ]);
+                    } else {
+                        Log::warning("Cannot calculate energy loss - missing temperature or room data", [
+                            'sensor_id' => $sensor->id,
+                            'temperature' => $latestTemp,
+                            'has_room' => $sensor->room !== null
+                        ]);
+                    }
+                } elseif ($doorState === 'closed' && $updatedSensorData) {
+                    // Finalize cumulative tracking and set energy loss to 0
+                    $this->updateEnergyCumulative(
+                        $updatedSensorData, 
+                        0.0, 
+                        'closed',
+                        $previousState['door_state'] ?? 'unknown'
+                    );
+                    
+                    Log::info("Energy loss set to 0 for closed door", [
+                        'sensor_id' => $sensor->id
+                    ]);
+                }
+                
+                // Broadcast door state detected event immediately
+                try {
+                    broadcast(new DoorStateDetected(
+                        $sensor->id,
+                        $doorState,
+                        $position,
+                        $confidence,
+                        $energyImpact
+                    ));
+                } catch (\Exception $e) {
+                    Log::warning("Failed to broadcast DoorStateDetected event: " . $e->getMessage());
+                }
+                
+                // Also broadcast sensor update for frontend
+                try {
+                    $this->broadcastSensorUpdate($sensor, $sensorData);
+                } catch (\Exception $e) {
+                    Log::warning("Failed to broadcast sensor update: " . $e->getMessage());
+                }
+                
+                Log::info("Door state detected for sensor {$sensor->id}", [
+                    'state' => $doorState,
+                    'position' => $position,
+                    'confidence' => $confidence,
+                    'angle' => $doorDetection['angle'] ?? 'N/A',
+                    'processing_time_ms' => $doorDetection['processing_time_ms'] ?? 'N/A',
+                    'raw_accel' => [
+                        'x' => $position['x'] / 64.0,
+                        'y' => $position['y'] / 64.0, 
+                        'z' => $position['z'] / 64.0
+                    ]
+                ]);
             }
 
         } catch (\Exception $e) {
@@ -1442,6 +1696,158 @@ class MQTTSubscriberService
             Log::error('Error handling neighbors message: ' . $e->getMessage(), [
                 'message' => $message,
                 'exception' => $e
+            ]);
+        }
+    }
+    
+    /**
+     * Update cumulative energy tracking fields
+     */
+    private function updateEnergyCumulative(
+        SensorData $sensorData, 
+        float $energyLossWatts, 
+        string $newState,
+        string $previousState
+    ): void {
+        try {
+            // Update the instant energy loss rate
+            $sensorData->energy_loss_watts = $energyLossWatts;
+            
+            if ($newState === 'opened') {
+                // Door is opening
+                if ($previousState !== 'opened') {
+                    // Transition from closed to opened - start new tracking
+                    $sensorData->door_open_since = now();
+                    $sensorData->cumulative_energy_kwh = 0.0;
+                    $sensorData->energy_cost_euros = 0.0;
+                    $sensorData->door_open_duration_seconds = 0;
+                    
+                    // Create new EnergyEvent
+                    $this->createEnergyEvent($sensorData, 'automatic');
+                    
+                    Log::info("Started cumulative energy tracking", [
+                        'sensor_id' => $sensorData->sensor_id,
+                        'door_open_since' => $sensorData->door_open_since,
+                        'energy_rate_watts' => $energyLossWatts
+                    ]);
+                } else {
+                    // Door was already open - update energy rate only
+                    // Cumulative will be calculated in real-time by model methods
+                    Log::debug("Updated energy rate for already opened door", [
+                        'sensor_id' => $sensorData->sensor_id,
+                        'new_energy_rate_watts' => $energyLossWatts
+                    ]);
+                }
+            } elseif ($newState === 'closed') {
+                // Door is closing
+                if ($previousState === 'opened' && $sensorData->door_open_since) {
+                    // Transition from opened to closed - finalize tracking
+                    $durationSeconds = (int) round($sensorData->door_open_since->diffInSeconds(now()));
+                    $finalEnergyKwh = $sensorData->getCurrentCumulativeEnergy();
+                    $finalCostEuros = $finalEnergyKwh * 0.1740;
+                    
+                    // Update final values
+                    $sensorData->cumulative_energy_kwh = $finalEnergyKwh;
+                    $sensorData->energy_cost_euros = $finalCostEuros;
+                    $sensorData->door_open_duration_seconds = $durationSeconds;
+                    $sensorData->door_open_since = null; // Clear since door is closed
+                    
+                    // Finalize EnergyEvent
+                    $this->finalizeEnergyEvent($sensorData, $finalEnergyKwh, $finalCostEuros, $durationSeconds);
+                    
+                    Log::info("Finalized cumulative energy tracking", [
+                        'sensor_id' => $sensorData->sensor_id,
+                        'total_energy_kwh' => $finalEnergyKwh,
+                        'total_cost_euros' => $finalCostEuros,
+                        'duration_seconds' => $durationSeconds
+                    ]);
+                } else {
+                    // Door was already closed - reset to ensure clean state
+                    $sensorData->cumulative_energy_kwh = 0.0;
+                    $sensorData->energy_cost_euros = 0.0;
+                    $sensorData->door_open_duration_seconds = 0;
+                    $sensorData->door_open_since = null;
+                }
+            }
+            
+            $sensorData->save();
+            
+        } catch (\Exception $e) {
+            Log::error("Failed to update energy cumulative", [
+                'sensor_id' => $sensorData->sensor_id,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+    
+    /**
+     * Create new EnergyEvent for opened door
+     */
+    private function createEnergyEvent(SensorData $sensorData, string $detectionMethod): void
+    {
+        try {
+            \App\Models\EnergyEvent::create([
+                'sensor_id' => $sensorData->sensor_id,
+                'start_time' => $sensorData->door_open_since,
+                'average_power_watts' => $sensorData->energy_loss_watts,
+                'avg_indoor_temp' => $sensorData->temperature,
+                'outdoor_temp' => $this->getOutdoorTemperature(),
+                'delta_temp' => abs(($sensorData->temperature ?? 0) - $this->getOutdoorTemperature()),
+                'is_ongoing' => true,
+                'detection_method' => $detectionMethod,
+                'total_energy_kwh' => 0.0,
+                'total_cost_euros' => 0.0,
+                'duration_seconds' => 0,
+            ]);
+            
+            Log::debug("Created EnergyEvent for opened door", [
+                'sensor_id' => $sensorData->sensor_id,
+                'start_time' => $sensorData->door_open_since
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error("Failed to create EnergyEvent", [
+                'sensor_id' => $sensorData->sensor_id,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+    
+    /**
+     * Finalize EnergyEvent for closed door
+     */
+    private function finalizeEnergyEvent(
+        SensorData $sensorData, 
+        float $totalEnergyKwh, 
+        float $totalCostEuros, 
+        int $durationSeconds
+    ): void {
+        try {
+            $ongoingEvent = \App\Models\EnergyEvent::where('sensor_id', $sensorData->sensor_id)
+                ->where('is_ongoing', true)
+                ->first();
+                
+            if ($ongoingEvent) {
+                $ongoingEvent->update([
+                    'end_time' => now(),
+                    'total_energy_kwh' => $totalEnergyKwh,
+                    'total_cost_euros' => $totalCostEuros,
+                    'duration_seconds' => $durationSeconds,
+                    'is_ongoing' => false,
+                ]);
+                
+                Log::debug("Finalized EnergyEvent for closed door", [
+                    'sensor_id' => $sensorData->sensor_id,
+                    'event_id' => $ongoingEvent->id,
+                    'total_energy_kwh' => $totalEnergyKwh,
+                    'total_cost_euros' => $totalCostEuros
+                ]);
+            }
+            
+        } catch (\Exception $e) {
+            Log::error("Failed to finalize EnergyEvent", [
+                'sensor_id' => $sensorData->sensor_id,
+                'error' => $e->getMessage()
             ]);
         }
     }

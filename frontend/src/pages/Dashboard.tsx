@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { 
   Thermometer, 
   Droplets, 
@@ -19,6 +19,8 @@ import useApiData from '../hooks/useApiData'
 import Gamification from '../components/Gamification'
 import NegotiationSystem from '../components/NegotiationSystem'
 import CalibrationModal from '../components/CalibrationModal'
+import DoorStateIndicator from '../components/DoorStateIndicator'
+import apiService from '../services/api'
 import type { SensorData, GamificationLevel } from '../types'
 
 interface DashboardProps {
@@ -60,13 +62,6 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
     sensor: null
   })
 
-  // Generate chart data from energy analytics
-  useEffect(() => {
-    if (energyAnalytics?.room_analytics && energyAnalytics.room_analytics.length > 0) {
-      generateChartData()
-    }
-  }, [energyAnalytics])
-
   useEffect(() => {
     // Subscribe to WebSocket events
     const unsubscribeConnected = webSocketService.on('connected', () => {
@@ -92,46 +87,6 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
       unsubscribeEnergy()
     }
   }, [setIsConnected])
-
-  const generateChartData = () => {
-    if (!energyAnalytics?.room_analytics || energyAnalytics.room_analytics.length === 0) {
-      setEnergyData([])
-      return
-    }
-
-    // Generate 24 hours of chart data based on real analytics
-    const now = new Date()
-    const chartData = Array.from({ length: 24 }, (_, i) => {
-      const time = new Date(now.getTime() - (23 - i) * 60 * 60 * 1000)
-      
-      // Calculate realistic values based on actual room analytics
-      const totalRooms = energyAnalytics.room_analytics.length
-      const avgEnergyLoss = energyAnalytics.room_analytics.reduce((sum, room) => sum + room.energy_loss_kwh, 0) / totalRooms
-      
-      // Generate temperature based on energy loss patterns (higher loss = higher temp difference)
-      const baseTemp = 21
-      const tempVariation = (avgEnergyLoss * 0.5) + (Math.sin(i * Math.PI / 12) * 3) // Daily temperature cycle
-      const temperature = Math.max(16, Math.min(28, baseTemp + tempVariation))
-      
-      // Generate humidity with realistic patterns
-      const baseHumidity = 45
-      const humidityVariation = (Math.cos(i * Math.PI / 8) * 8) + (Math.random() - 0.5) * 4
-      const humidity = Math.max(30, Math.min(70, baseHumidity + humidityVariation))
-      
-      // Convert kWh to W for hourly display and add some realistic variation
-      const hourlyEnergyLoss = (avgEnergyLoss * 1000) * (0.7 + Math.random() * 0.6)
-      
-      return {
-        timestamp: time.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-        temperature: Math.round(temperature * 10) / 10,
-        humidity: Math.round(humidity * 10) / 10,
-        energy_loss: Math.max(0, Math.round(hourlyEnergyLoss)),
-        door_state: Math.random() > 0.8 // Realistic door open probability
-      }
-    })
-    
-    setEnergyData(chartData)
-  }
 
   const updateSensorData = (event: any) => {
     // Refresh sensor data when WebSocket update is received
@@ -185,14 +140,92 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
     })
   }
 
-  // Use real data from APIs
-  const totalEnergyLoss = (energyAnalytics?.total_energy_loss_kwh || 0) * 1000 || energyData.reduce((sum, point) => sum + point.energy_loss, 0)
-  const averageTemperature = sensors.length > 0 
-    ? sensors.filter(s => s.data?.temperature).reduce((sum, s) => sum + (s.data?.temperature || 0), 0) / sensors.filter(s => s.data?.temperature).length || 22
-    : energyData.length > 0 ? energyData.reduce((sum, point) => sum + point.temperature, 0) / energyData.length : 22
-  const doorsOpen = overview?.energy.rooms_with_open_doors || sensors.filter(s => s.data?.door_state).length
-  const activeSensors = overview?.infrastructure.active_sensors || sensors.filter(s => s.is_online).length
-  const totalSensors = overview?.infrastructure.total_sensors || sensors.length
+  // Helper function to map sensor data to door state
+  const mapDoorState = (sensorData: SensorData | null): 'closed' | 'opened' | 'probably_opened' | 'moving' => {
+    if (!sensorData) return 'closed'
+    if (sensorData.movement_state === 'moving') return 'moving'
+    if (sensorData.door_state === null || sensorData.door_state === undefined) return 'closed'
+    return sensorData.door_state ? 'opened' : 'closed'
+  }
+
+  // Handle door state confirmation
+  const handleDoorStateConfirmation = async (sensorId: string, state: 'closed' | 'opened', notes?: string) => {
+    try {
+      const response = await apiService.confirmDoorState(sensorId, state, notes)
+      if (response.success) {
+        console.log('Door state confirmed:', response.data)
+        // Refresh sensor data to reflect changes
+        refreshSensors()
+        // Show success notification (could be enhanced with a toast)
+        alert(`État confirmé! ${response.data?.points_awarded || 0} points gagnés.`)
+      } else {
+        alert('Erreur lors de la confirmation')
+      }
+    } catch (error) {
+      console.error('Failed to confirm door state:', error)
+      alert('Erreur lors de la confirmation')
+    }
+  }
+
+  // Calculate real statistics from sensor data
+  const sensorsWithTemp = sensors.filter(s => s.data?.temperature !== null && s.data?.temperature !== undefined)
+  const averageTemperature = sensorsWithTemp.length > 0 
+    ? sensorsWithTemp.reduce((sum, s) => sum + (Number(s.data?.temperature) || 0), 0) / sensorsWithTemp.length
+    : 0
+  
+  const sensorsWithOpenDoors = sensors.filter(s => s.data?.door_state === true)
+  const doorsOpen = sensorsWithOpenDoors.length
+  
+  const totalEnergyLoss = sensors.reduce((sum, s) => {
+    const energyLoss = Number(s.data?.energy_loss_watts) || 0
+    return sum + energyLoss
+  }, 0)
+  
+  const activeSensors = sensors.filter(s => s.is_online).length
+  const totalSensors = sensors.length
+
+  // Generate chart data based on current sensor readings
+  const generateChartData = useCallback(() => {
+    // Generate 24 hours of chart data based on current sensor data
+    const now = new Date()
+    const chartData = Array.from({ length: 24 }, (_, i) => {
+      const time = new Date(now.getTime() - (23 - i) * 60 * 60 * 1000)
+      
+      // Use current sensor data as base values with hourly variation
+      const currentTemp = averageTemperature || 22
+      const currentEnergyLoss = totalEnergyLoss || 0
+      
+      // Add daily temperature cycle variation
+      const tempVariation = Math.sin((i - 6) * Math.PI / 12) * 3 // Peak at 18:00, low at 06:00
+      const temperature = Math.max(16, Math.min(28, currentTemp + tempVariation))
+      
+      // Generate realistic humidity pattern (inverse to temperature)
+      const baseHumidity = 50
+      const humidityVariation = Math.cos((i - 6) * Math.PI / 12) * 10 // Inverse to temperature
+      const humidity = Math.max(30, Math.min(70, baseHumidity + humidityVariation))
+      
+      // Energy loss varies based on temperature difference and door states
+      const energyVariation = Math.sin(i * Math.PI / 8) * 0.3 + (Math.random() - 0.5) * 0.2
+      const hourlyEnergyLoss = Math.max(0, currentEnergyLoss * (1 + energyVariation))
+      
+      return {
+        timestamp: time.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+        temperature: Math.round(temperature * 10) / 10,
+        humidity: Math.round(humidity * 10) / 10,
+        energy_loss: Math.round(hourlyEnergyLoss),
+        door_state: doorsOpen > 0 // Use current door state
+      }
+    })
+    
+    setEnergyData(chartData)
+  }, [averageTemperature, totalEnergyLoss, doorsOpen])
+
+  // Generate chart data when sensor data changes
+  useEffect(() => {
+    if (sensors.length > 0) {
+      generateChartData()
+    }
+  }, [sensors, generateChartData])
 
   if (sensorsLoading && overviewLoading) {
     return (
@@ -255,7 +288,7 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
           <div className="flex items-center justify-between">
             <div>
               <p className="text-white/70 text-sm">Temp. Moyenne</p>
-              <p className="text-2xl font-bold text-white">{averageTemperature.toFixed(1)}°C</p>
+              <p className="text-2xl font-bold text-white">{Number(averageTemperature || 0).toFixed(1)}°C</p>
             </div>
             <Thermometer className="w-8 h-8 text-blue-400" />
           </div>
@@ -275,7 +308,10 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
           <div className="flex items-center justify-between">
             <div>
               <p className="text-white/70 text-sm">Perte Énergétique</p>
-              <p className="text-2xl font-bold text-white">{totalEnergyLoss.toFixed(0)}W</p>
+              <p className="text-2xl font-bold text-white">{Number(totalEnergyLoss || 0).toFixed(0)}W</p>
+              {energyAnalytics?.total_cost && (
+                <p className="text-sm text-white/60">≈ {energyAnalytics.total_cost.toFixed(2)}€/jour</p>
+              )}
             </div>
             <Zap className="w-8 h-8 text-red-400" />
           </div>
@@ -384,16 +420,14 @@ const Dashboard = ({ setIsConnected, gamification, currentUser }: DashboardProps
               </div>
 
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {sensor.data?.door_state ? (
-                    <DoorOpen className={`w-4 h-4 ${getDoorStateColor(sensor.data?.door_state, sensor.data?.energy_loss_watts)}`} />
-                  ) : (
-                    <DoorClosed className="w-4 h-4 text-green-400" />
-                  )}
-                  <span className="text-white/70 text-sm">
-                    {sensor.data?.door_state ? 'Ouverte' : 'Fermée'}
-                  </span>
-                </div>
+                <DoorStateIndicator
+                  state={mapDoorState(sensor.data)}
+                  certainty={sensor.door_state_certainty || 'UNCERTAIN'}
+                  needsConfirmation={sensor.needs_confirmation || false}
+                  sensorId={sensor.sensor_id}
+                  onConfirmState={handleDoorStateConfirmation}
+                  className="flex-shrink-0"
+                />
                 
                 <div className="flex items-center gap-1">
                   <Zap className={`w-4 h-4 ${sensor.data?.energy_loss_watts && sensor.data?.energy_loss_watts > 0 ? 'text-red-400' : 'text-green-400'}`} />

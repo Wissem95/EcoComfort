@@ -431,13 +431,14 @@ class EventController extends Controller
         $roomIds = Room::whereIn('building_id', $organization->buildings->pluck('id'))->pluck('id');
         
         return [
-            'unacknowledged_count' => Event::whereIn('room_id', $roomIds)
+            'total_events' => Event::whereIn('room_id', $roomIds)->count(),
+            'unacknowledged_events' => Event::whereIn('room_id', $roomIds)
                 ->where('acknowledged', false)->count(),
-            'critical_count' => Event::whereIn('room_id', $roomIds)
+            'critical_events' => Event::whereIn('room_id', $roomIds)
                 ->where('severity', 'critical')
                 ->where('acknowledged', false)->count(),
-            'last_24h_count' => Event::whereIn('room_id', $roomIds)
-                ->where('created_at', '>=', now()->subDay())->count(),
+            'total_cost_impact' => (float) Event::whereIn('room_id', $roomIds)
+                ->sum('cost_impact'),
         ];
     }
 }

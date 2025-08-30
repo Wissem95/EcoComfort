@@ -25,8 +25,8 @@ class WebSocketService {
         broadcaster: 'reverb',
         key: import.meta.env.VITE_APP_KEY || 'app-key',
         wsHost: import.meta.env.VITE_WS_HOST || 'localhost',
-        wsPort: parseInt(import.meta.env.VITE_WS_PORT || '8080'),
-        wssPort: parseInt(import.meta.env.VITE_WS_PORT || '8080'),
+        wsPort: parseInt(import.meta.env.VITE_WS_PORT || '8081'),
+        wssPort: parseInt(import.meta.env.VITE_WS_PORT || '8081'),
         forceTLS: false,
         encrypted: false,
         disableStats: true,
@@ -139,6 +139,9 @@ class WebSocketService {
       })
       .listen('EnergyAnalyticsUpdated', (event: any) => {
         this.emit('energy-updated', event);
+      })
+      .listen('door.state.certainty.changed', (event: any) => {
+        this.emit('door-state-certainty-changed', event);
       });
   }
 

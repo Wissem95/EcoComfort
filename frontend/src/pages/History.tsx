@@ -15,10 +15,11 @@ import {
   TrendingUp,
   BarChart3,
   LineChart as LineChartIcon,
-  Search
+  Search,
+  Loader2
 } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, AreaChart, Area } from 'recharts'
-import type { Event } from '../types'
+import apiService, { type EventData, type EventsResponse } from '../services/api'
 
 const History = () => {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | '90d'>('7d')
@@ -26,124 +27,124 @@ const History = () => {
   const [severity, setSeverity] = useState<'all' | 'info' | 'warning' | 'critical'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [chartView, setChartView] = useState<'line' | 'bar' | 'area'>('line')
-  const [events, setEvents] = useState<Event[]>([])
-  const [historicalData, setHistoricalData] = useState<Array<{
-    timestamp: string
-    date: string
-    temperature: number
-    humidity: number
-    energy_loss: number
-    events_count: number
-    doors_opened: number
-    cost_impact: number
-  }>>([])
+  const [events, setEvents] = useState<EventData[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [statistics, setStatistics] = useState<{
+    total_events: number
+    unacknowledged_events: number
+    critical_events: number
+    total_cost_impact: number
+  } | null>(null)
 
   useEffect(() => {
-    generateMockHistoricalData()
-  }, [timeRange])
+    fetchEvents()
+  }, [timeRange, eventType, severity])
 
-  const generateMockHistoricalData = () => {
+  const fetchEvents = async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      
+      const endDate = new Date()
+      const startDate = new Date()
+      
+      // Calculate date range based on timeRange
+      switch (timeRange) {
+        case '24h':
+          startDate.setHours(startDate.getHours() - 24)
+          break
+        case '7d':
+          startDate.setDate(startDate.getDate() - 7)
+          break
+        case '30d':
+          startDate.setDate(startDate.getDate() - 30)
+          break
+        case '90d':
+          startDate.setDate(startDate.getDate() - 90)
+          break
+      }
+      
+      const params: {
+        start_date: string;
+        end_date: string;
+        limit: number;
+        type?: string;
+        severity?: 'info' | 'warning' | 'critical';
+      } = {
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        limit: 100
+      }
+      
+      if (eventType !== 'all') {
+        params.type = eventType
+      }
+      
+      if (severity !== 'all') {
+        params.severity = severity
+      }
+      
+      const response: EventsResponse = await apiService.getEvents(params)
+      setEvents(response.events)
+      setStatistics(response.statistics)
+      
+    } catch (err) {
+      console.error('Failed to fetch events:', err)
+      setError('Failed to load events')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Generate chart data from events for visualization
+  const generateChartDataFromEvents = () => {
+    const chartData: Array<{
+      timestamp: string
+      date: string
+      cost_impact: number
+      events_count: number
+    }> = []
+    
     const days = timeRange === '24h' ? 1 : timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90
     const intervals = timeRange === '24h' ? 24 : days
-    
-    const historicalEvents: Event[] = []
-    const chartData: typeof historicalData = []
     
     for (let i = intervals - 1; i >= 0; i--) {
       const date = new Date()
       if (timeRange === '24h') {
         date.setHours(date.getHours() - i)
+        date.setMinutes(0, 0, 0)
       } else {
         date.setDate(date.getDate() - i)
+        date.setHours(0, 0, 0, 0)
       }
       
-      const eventsForPeriod = Math.floor(Math.random() * 5)
-      const temperature = 20 + Math.random() * 8
-      const humidity = 35 + Math.random() * 30
-      const energyLoss = Math.random() * 300
-      const doorsOpened = Math.floor(Math.random() * 3)
-      
-      // Generate events for this period
-      for (let j = 0; j < eventsForPeriod; j++) {
-        const eventId = `event-${i}-${j}`
-        const eventTypes = ['door_open', 'temperature_high', 'energy_loss', 'battery_low'] as const
-        const severities = ['info', 'warning', 'critical'] as const
-        const rooms = ['Bureau Principal', 'Salle de Réunion A', 'Couloir Est', 'Espace Détente']
-        
-        const type = eventTypes[Math.floor(Math.random() * eventTypes.length)]
-        const sev = severities[Math.floor(Math.random() * severities.length)]
-        const room = rooms[Math.floor(Math.random() * rooms.length)]
-        
-        const eventDate = new Date(date.getTime() + Math.random() * (timeRange === '24h' ? 3600000 : 86400000))
-        
-        historicalEvents.push({
-          id: eventId,
-          type,
-          severity: sev,
-          message: generateEventMessage(type, room),
-          cost_impact: Math.random() * 50,
-          acknowledged: Math.random() > 0.3,
-          acknowledged_at: Math.random() > 0.5 ? eventDate.toISOString() : undefined,
-          data: { room_name: room, temperature, humidity },
-          sensor: {
-            id: `sensor-${Math.floor(Math.random() * 3) + 1}`,
-            name: `RuuviTag-${112 + Math.floor(Math.random() * 3) * 2}`,
-            mac_address: 'AA:BB:CC:DD:EE:FF',
-            position: 'door',
-            battery_level: 50 + Math.random() * 50,
-            is_active: true,
-            is_online: true,
-            room: {
-              id: 'room-1',
-              name: room,
-              type: 'office',
-              floor: 1,
-              surface_m2: 25,
-              target_temperature: 23,
-              target_humidity: 50,
-              building: {
-                id: 'building-1',
-                name: 'Bâtiment Principal',
-                address: '123 Rue de l\'Énergie',
-                floors_count: 3
-              }
-            }
-          },
-          room: {
-            id: 'room-1',
-            name: room,
-            type: 'office',
-            floor: 1,
-            surface_m2: 25,
-            target_temperature: 23,
-            target_humidity: 50,
-            building: {
-              id: 'building-1',
-              name: 'Bâtiment Principal',
-              address: '123 Rue de l\'Énergie',
-              floors_count: 3
-            }
-          },
-          created_at: eventDate.toISOString()
-        })
+      const endDate = new Date(date)
+      if (timeRange === '24h') {
+        endDate.setHours(endDate.getHours() + 1)
+      } else {
+        endDate.setDate(endDate.getDate() + 1)
       }
+      
+      // Filter events for this time period
+      const eventsInPeriod = events.filter(event => {
+        const eventDate = new Date(event.created_at)
+        return eventDate >= date && eventDate < endDate
+      })
+      
+      const totalCostImpact = eventsInPeriod.reduce((sum, event) => sum + (event.cost_impact || 0), 0)
       
       chartData.push({
         timestamp: timeRange === '24h' 
           ? date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
           : date.toLocaleDateString('fr-FR', { month: 'short', day: 'numeric' }),
         date: date.toISOString(),
-        temperature,
-        humidity,
-        energy_loss: energyLoss,
-        events_count: eventsForPeriod,
-        doors_opened: doorsOpened,
-        cost_impact: eventsForPeriod * 12.5 + energyLoss * 0.15
+        cost_impact: totalCostImpact,
+        events_count: eventsInPeriod.length
       })
     }
     
-    setEvents(historicalEvents.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()))
-    setHistoricalData(chartData)
+    return chartData
   }
 
   const generateEventMessage = (type: string, room: string): string => {
@@ -194,10 +195,12 @@ const History = () => {
     return matchesType && matchesSeverity && matchesSearch
   })
 
-  const totalEvents = filteredEvents.length
+  const totalEvents = statistics?.total_events || filteredEvents.length
   const acknowledgedEvents = filteredEvents.filter(e => e.acknowledged).length
-  const totalCostImpact = filteredEvents.reduce((sum, e) => sum + (e.cost_impact || 0), 0)
-  const avgEnergyLoss = historicalData.reduce((sum, d) => sum + d.energy_loss, 0) / historicalData.length
+  const totalCostImpact = Number(statistics?.total_cost_impact ?? filteredEvents.reduce((sum, e) => sum + Number(e.cost_impact || 0), 0) ?? 0)
+  
+  // Generate chart data from real events
+  const chartData = generateChartDataFromEvents()
 
   const exportData = () => {
     const csvContent = [
@@ -208,7 +211,7 @@ const History = () => {
         event.severity,
         `"${event.message}"`,
         event.room.name,
-        event.cost_impact?.toFixed(2) || '0',
+        Number(event.cost_impact || 0).toFixed(2),
         event.acknowledged ? 'Oui' : 'Non'
       ].join(','))
     ].join('\n')
@@ -229,7 +232,7 @@ const History = () => {
     
     return (
       <ResponsiveContainer width="100%" height={300}>
-        <ChartComponent data={historicalData}>
+        <ChartComponent data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
           <XAxis dataKey="timestamp" stroke="rgba(255,255,255,0.5)" />
           <YAxis stroke="rgba(255,255,255,0.5)" />
@@ -241,23 +244,21 @@ const History = () => {
               color: 'white'
             }}
           />
-          {chartView === 'line' && (
+          {chartView === 'area' && (
             <>
-              <Line type="monotone" dataKey="temperature" stroke="#3b82f6" strokeWidth={2} name="Température (°C)" />
-              <Line type="monotone" dataKey="humidity" stroke="#06b6d4" strokeWidth={2} name="Humidité (%)" />
-              <Line type="monotone" dataKey="energy_loss" stroke="#ef4444" strokeWidth={2} name="Perte Énergétique (W)" />
+              <Area type="monotone" dataKey="cost_impact" stroke="#ef4444" fill="rgba(239,68,68,0.2)" name="Impact Coût (€)" />
             </>
           )}
           {chartView === 'bar' && (
             <>
               <Bar dataKey="events_count" fill="#8b5cf6" name="Nombre d'événements" />
-              <Bar dataKey="doors_opened" fill="#f59e0b" name="Portes ouvertes" />
+              <Bar dataKey="cost_impact" fill="#ef4444" name="Impact Coût (€)" />
             </>
           )}
-          {chartView === 'area' && (
+          {chartView === 'line' && (
             <>
-              <Area type="monotone" dataKey="cost_impact" stroke="#ef4444" fill="rgba(239,68,68,0.2)" name="Impact Coût (€)" />
-              <Area type="monotone" dataKey="energy_loss" stroke="#f59e0b" fill="rgba(245,158,11,0.2)" name="Perte Énergétique (W)" />
+              <Line type="monotone" dataKey="cost_impact" stroke="#ef4444" strokeWidth={2} name="Impact Coût (€)" />
+              <Line type="monotone" dataKey="events_count" stroke="#8b5cf6" strokeWidth={2} name="Nombre d'événements" />
             </>
           )}
         </ChartComponent>
@@ -316,7 +317,7 @@ const History = () => {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-white/70 text-sm">Impact Coût</p>
-              <p className="text-2xl font-bold text-white">{totalCostImpact.toFixed(0)}€</p>
+              <p className="text-2xl font-bold text-white">{Number(totalCostImpact || 0).toFixed(0)}€</p>
             </div>
             <TrendingUp className="w-8 h-8 text-red-400" />
           </div>
@@ -325,10 +326,10 @@ const History = () => {
         <div className="glass-card p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-white/70 text-sm">Perte Moy.</p>
-              <p className="text-2xl font-bold text-white">{avgEnergyLoss.toFixed(0)}W</p>
+              <p className="text-white/70 text-sm">Événements Critiques</p>
+              <p className="text-2xl font-bold text-white">{statistics?.critical_events || filteredEvents.filter(e => e.severity === 'critical').length}</p>
             </div>
-            <Zap className="w-8 h-8 text-yellow-400" />
+            <Zap className="w-8 h-8 text-red-400" />
           </div>
         </div>
       </div>
@@ -437,7 +438,23 @@ const History = () => {
       <div className="glass-card p-6">
         <h3 className="text-xl font-semibold text-white mb-6">Événements Détaillés</h3>
         
-        {filteredEvents.length === 0 ? (
+        {loading ? (
+          <div className="text-center py-8 text-white/60">
+            <Loader2 className="w-8 h-8 mx-auto mb-4 animate-spin" />
+            <p>Chargement des événements...</p>
+          </div>
+        ) : error ? (
+          <div className="text-center py-8 text-red-400">
+            <AlertTriangle className="w-12 h-12 mx-auto mb-4 opacity-50" />
+            <p>{error}</p>
+            <button 
+              onClick={fetchEvents}
+              className="mt-4 glass-button-primary"
+            >
+              Réessayer
+            </button>
+          </div>
+        ) : filteredEvents.length === 0 ? (
           <div className="text-center py-8 text-white/60">
             <AlertTriangle className="w-12 h-12 mx-auto mb-4 opacity-50" />
             <p>Aucun événement trouvé pour les filtres sélectionnés</p>
@@ -476,7 +493,7 @@ const History = () => {
                         {event.severity}
                       </span>
                       {event.cost_impact && (
-                        <span>💰 {event.cost_impact.toFixed(2)}€</span>
+                        <span>💰 {Number(event.cost_impact).toFixed(2)}€</span>
                       )}
                     </div>
                     

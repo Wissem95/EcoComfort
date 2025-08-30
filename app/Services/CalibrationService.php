@@ -12,8 +12,8 @@ use Carbon\Carbon;
 
 class CalibrationService
 {
-    // Position tolerance for Wirepas sensors (±2 units as per spec)
-    private const POSITION_TOLERANCE = 2;
+    // Position tolerance for Wirepas sensors (±0.5 units for sensitive detection)
+    private const POSITION_TOLERANCE = 0.5;
     
     // Stability requirements
     private const MIN_STABILITY_SAMPLES = 10;

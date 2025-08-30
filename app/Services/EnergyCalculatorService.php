@@ -174,62 +174,96 @@ class EnergyCalculatorService
     {
         $startTime = now()->subHours($hours);
         
-        // Get all sensor data for the room in the time period
-        $sensorData = SensorData::whereIn('sensor_id', $room->sensors->pluck('id'))
+        // Get ALL sensor data for the room in the time period (not just opened doors)
+        $allSensorData = SensorData::whereIn('sensor_id', $room->sensors->pluck('id'))
             ->where('timestamp', '>=', $startTime)
-            ->where('door_state', true)
-            ->orderBy('timestamp')
+            ->orderBy('sensor_id', 'asc')
+            ->orderBy('timestamp', 'asc')
             ->get();
         
         $totalEnergyLoss = 0;
         $totalDuration = 0;
         $events = [];
+        $sensorEvents = [];
         
-        // Group consecutive open door events
-        $currentEvent = null;
+        // Group by sensor and detect state transitions
+        $dataBySensor = $allSensorData->groupBy('sensor_id');
         
-        foreach ($sensorData as $data) {
-            if ($data->door_state && !$currentEvent) {
-                // Start of new open door event
-                $currentEvent = [
-                    'start' => $data->timestamp,
-                    'sensor_id' => $data->sensor_id,
-                    'energy_loss' => 0,
-                ];
-            } elseif (!$data->door_state && $currentEvent) {
-                // End of open door event
-                $duration = $data->timestamp->diffInSeconds($currentEvent['start']);
-                $energyLoss = ($data->energy_loss_watts ?? 0) * ($duration / 3600); // Convert to Wh
+        foreach ($dataBySensor as $sensorId => $sensorData) {
+            $currentEvent = null;
+            $previousState = null;
+            $energyRates = []; // Track energy rates during open period
+            
+            foreach ($sensorData as $data) {
+                $currentState = (bool)$data->door_state;
                 
-                $currentEvent['end'] = $data->timestamp;
+                // Detect transition from closed to opened
+                if ($currentState && ($previousState === false || $previousState === null) && !$currentEvent) {
+                    $currentEvent = [
+                        'start' => $data->timestamp,
+                        'sensor_id' => $sensorId,
+                        'ongoing' => true
+                    ];
+                    $energyRates = []; // Reset energy rates
+                }
+                
+                // Collect energy rates during opened state
+                if ($currentState && $currentEvent && $data->energy_loss_watts && $data->energy_loss_watts > 0) {
+                    $energyRates[] = $data->energy_loss_watts;
+                }
+                
+                // Detect transition from opened to closed
+                if (!$currentState && $previousState === true && $currentEvent) {
+                    $duration = $currentEvent['start']->diffInSeconds($data->timestamp);
+                    
+                    // Calculate average energy loss during the open period
+                    $avgEnergyLoss = count($energyRates) > 0 
+                        ? array_sum($energyRates) / count($energyRates)
+                        : 0;
+                    
+                    $energyLoss = $avgEnergyLoss * ($duration / 3600); // Convert to Wh
+                    
+                    $currentEvent['end'] = $data->timestamp;
+                    $currentEvent['duration'] = $duration;
+                    $currentEvent['total_energy_wh'] = $energyLoss;
+                    $currentEvent['avg_power_watts'] = $avgEnergyLoss;
+                    $currentEvent['ongoing'] = false;
+                    
+                    $events[] = $currentEvent;
+                    $sensorEvents[$sensorId][] = $currentEvent;
+                    
+                    $totalEnergyLoss += $energyLoss;
+                    $totalDuration += $duration;
+                    
+                    $currentEvent = null;
+                    $energyRates = [];
+                }
+                
+                $previousState = $currentState;
+            }
+            
+            // Handle ongoing events (doors still open)
+            if ($currentEvent && $currentEvent['ongoing']) {
+                $duration = $currentEvent['start']->diffInSeconds(now());
+                
+                // Use average energy rate from collected rates or 0
+                $avgEnergyLoss = count($energyRates) > 0 
+                    ? array_sum($energyRates) / count($energyRates)
+                    : 0;
+                    
+                $energyLoss = $avgEnergyLoss * ($duration / 3600);
+                
+                $currentEvent['end'] = now();
                 $currentEvent['duration'] = $duration;
-                $currentEvent['energy_loss'] = $energyLoss;
+                $currentEvent['total_energy_wh'] = $energyLoss;
+                $currentEvent['avg_power_watts'] = $avgEnergyLoss;
                 
                 $events[] = $currentEvent;
+                $sensorEvents[$sensorId][] = $currentEvent;
+                
                 $totalEnergyLoss += $energyLoss;
                 $totalDuration += $duration;
-                
-                $currentEvent = null;
-            } elseif ($data->door_state && $currentEvent) {
-                // Continue accumulating energy loss
-                $currentEvent['energy_loss'] += $data->energy_loss_watts ?? 0;
             }
-        }
-        
-        // Handle ongoing event
-        if ($currentEvent) {
-            $duration = now()->diffInSeconds($currentEvent['start']);
-            $avgEnergyLoss = $currentEvent['energy_loss'] / max(1, count($sensorData));
-            $energyLoss = $avgEnergyLoss * ($duration / 3600);
-            
-            $currentEvent['end'] = now();
-            $currentEvent['duration'] = $duration;
-            $currentEvent['energy_loss'] = $energyLoss;
-            $currentEvent['ongoing'] = true;
-            
-            $events[] = $currentEvent;
-            $totalEnergyLoss += $energyLoss;
-            $totalDuration += $duration;
         }
         
         return [
@@ -238,11 +272,12 @@ class EnergyCalculatorService
             'total_duration_seconds' => $totalDuration,
             'total_duration_hours' => round($totalDuration / 3600, 2),
             'average_power_loss_watts' => $totalDuration > 0 
-                ? round($totalEnergyLoss / ($totalDuration / 3600), 2)
+                ? round(($totalEnergyLoss / ($totalDuration / 3600)), 2)
                 : 0,
             'estimated_cost' => $this->calculateCost($totalEnergyLoss / 1000),
             'events' => $events,
             'event_count' => count($events),
+            'sensors_with_events' => count($sensorEvents),
         ];
     }
     

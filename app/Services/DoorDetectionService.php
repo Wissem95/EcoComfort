@@ -34,7 +34,8 @@ class DoorDetectionService
         float $accelX,
         float $accelY,
         float $accelZ,
-        string $sensorId
+        string $sensorId,
+        ?array $startPosition = null
     ): array {
         $startTime = microtime(true); // Performance tracking
         
@@ -43,6 +44,39 @@ class DoorDetectionService
         $calibrationData = $sensor ? $sensor->calibration_data : null;
         $closedReference = $calibrationData['door_position']['closed_reference'] ?? null;
         $tolerance = $calibrationData['door_position']['tolerance'] ?? 2;
+        
+        // Debug log calibration loading
+        Log::debug("Loading calibration for sensor {$sensorId}", [
+            'sensor_found' => $sensor ? true : false,
+            'calibration_data_exists' => $calibrationData ? true : false,
+            'closed_reference' => $closedReference,
+            'tolerance' => $tolerance
+        ]);
+        
+        // Enhanced detection with movement context if start position is available
+        $movementContext = null;
+        if ($startPosition) {
+            $movementContext = [
+                'movement_delta' => [
+                    'x' => $accelX * 64.0 - $startPosition['x'], // Convert back to Wirepas scale for comparison
+                    'y' => $accelY * 64.0 - $startPosition['y'],
+                    'z' => $accelZ * 64.0 - $startPosition['z']
+                ],
+                'movement_magnitude' => sqrt(
+                    pow($accelX * 64.0 - $startPosition['x'], 2) +
+                    pow($accelY * 64.0 - $startPosition['y'], 2) +
+                    pow($accelZ * 64.0 - $startPosition['z'], 2)
+                )
+            ];
+            
+            Log::debug("Movement context calculated", [
+                'sensor_id' => $sensorId,
+                'start_position' => $startPosition,
+                'stop_position' => ['x' => $accelX * 64.0, 'y' => $accelY * 64.0, 'z' => $accelZ * 64.0],
+                'movement_delta' => $movementContext['movement_delta'],
+                'movement_magnitude' => $movementContext['movement_magnitude']
+            ]);
+        }
         
         // Calculate magnitude and angle - this is the key for accurate detection
         $magnitude = sqrt($accelX * $accelX + $accelY * $accelY + $accelZ * $accelZ);
@@ -55,6 +89,7 @@ class DoorDetectionService
         
         $doorState = 'closed';
         $confidence = 0.5;
+        $certainty = 'UNCERTAIN'; // Default certainty level
         
         // Use calibration data if available
         if ($closedReference) {
@@ -70,34 +105,80 @@ class DoorDetectionService
                 'z' => abs($wirepasZ - $closedReference['z'])
             ];
             
-            // Check if current position is within tolerance of closed reference
-            $isWithinTolerance = (
-                $positionDiff['x'] <= $tolerance &&
-                $positionDiff['y'] <= $tolerance &&
-                $positionDiff['z'] <= $tolerance
-            );
+            // Calculate maximum difference for 3-level certainty logic
+            $maxDiff = max($positionDiff['x'], $positionDiff['y'], $positionDiff['z']);
             
-            if ($isWithinTolerance) {
+            // Enhanced detection with movement context
+            $movementBonus = 0;
+            if ($movementContext) {
+                // If movement was small (< 5 units), increase confidence in closed state
+                if ($movementContext['movement_magnitude'] < 5) {
+                    $movementBonus = 0.2; // Small movement suggests minor adjustment, likely still closed
+                    Log::debug("Small movement detected, boosting closed confidence", [
+                        'sensor_id' => $sensorId,
+                        'movement_magnitude' => $movementContext['movement_magnitude'],
+                        'confidence_bonus' => $movementBonus
+                    ]);
+                }
+                // If movement was large (> 20 units), suggest door opening
+                elseif ($movementContext['movement_magnitude'] > 20) {
+                    $movementBonus = -0.3; // Large movement suggests door opening
+                    Log::debug("Large movement detected, suggesting door opening", [
+                        'sensor_id' => $sensorId,
+                        'movement_magnitude' => $movementContext['movement_magnitude'],
+                        'confidence_penalty' => abs($movementBonus)
+                    ]);
+                }
+            }
+            
+            // 3-level certainty logic: 0.8, 1.5, >1.5 (with movement context)
+            $adjustedMaxDiff = $maxDiff - ($movementBonus * 2); // Convert confidence bonus to position tolerance
+            
+            if ($adjustedMaxDiff <= 0.8) {
                 $doorState = 'closed';
-                $confidence = 0.9; // High confidence with calibration
-                Log::debug("Door detected as CLOSED using calibration", [
+                $certainty = 'CERTAIN';
+                $confidence = 0.95; // Very high confidence
+                
+                // Update dynamic calibration (weighted average: 90% old, 10% new)
+                $this->updateDynamicCalibration($sensorId, ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ]);
+                
+                Log::debug("Door CERTAINLY CLOSED using calibration", [
                     'sensor_id' => $sensorId,
                     'current_wirepas' => ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ],
-                    'current_normalized' => ['x' => $accelX, 'y' => $accelY, 'z' => $accelZ],
                     'reference' => $closedReference,
                     'diff' => $positionDiff,
-                    'tolerance' => $tolerance
+                    'max_diff' => $maxDiff,
+                    'certainty' => $certainty
+                ]);
+            } elseif ($adjustedMaxDiff <= 1.5) {
+                $doorState = 'probably_opened';
+                $certainty = 'PROBABLE';
+                $confidence = 0.7 + ($movementBonus * 0.5); // Apply movement context bonus
+                
+                Log::debug("Door PROBABLY OPENED using calibration", [
+                    'sensor_id' => $sensorId,
+                    'current_wirepas' => ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ],
+                    'reference' => $closedReference,
+                    'diff' => $positionDiff,
+                    'max_diff' => $maxDiff,
+                    'adjusted_max_diff' => $adjustedMaxDiff,
+                    'movement_bonus' => $movementBonus,
+                    'certainty' => $certainty
                 ]);
             } else {
                 $doorState = 'opened';
-                $confidence = 0.8; // High confidence - clearly different from closed reference
-                Log::debug("Door detected as OPEN using calibration", [
+                $certainty = 'CERTAIN';
+                $confidence = 0.85 + ($movementBonus * 0.3); // Apply movement context bonus
+                
+                Log::debug("Door CERTAINLY OPENED using calibration", [
                     'sensor_id' => $sensorId,
                     'current_wirepas' => ['x' => $wirepasX, 'y' => $wirepasY, 'z' => $wirepasZ],
-                    'current_normalized' => ['x' => $accelX, 'y' => $accelY, 'z' => $accelZ],
                     'reference' => $closedReference,
                     'diff' => $positionDiff,
-                    'tolerance' => $tolerance
+                    'max_diff' => $maxDiff,
+                    'adjusted_max_diff' => $adjustedMaxDiff,
+                    'movement_bonus' => $movementBonus,
+                    'certainty' => $certainty
                 ]);
             }
         } else {
@@ -110,20 +191,24 @@ class DoorDetectionService
             if ($angle > 30) {
                 // Large angle indicates door is significantly tilted (opened)
                 $doorState = 'opened';
+                $certainty = 'PROBABLE'; // Angle-based detection is less certain
                 $baseConfidence = 0.7 + ($angle / 100.0);
                 $confidence = min(0.95, $baseConfidence * $signalClarity);
             } elseif ($angle < 15 && abs($accelZ) > 0.9) {
                 // Small angle and high z-acceleration indicates vertical/closed position
                 $doorState = 'closed';
+                $certainty = 'PROBABLE'; // Angle-based detection is less certain
                 $baseConfidence = 0.8 + (abs($accelZ) - 0.9) * 2;
                 $confidence = min(0.95, $baseConfidence * $signalClarity);
             } else {
                 // Intermediate cases - use combined criteria
                 if (abs($accelX) > 0.4 || abs($accelY) > 0.3) {
                     $doorState = 'opened';
+                    $certainty = 'UNCERTAIN'; // Low certainty for intermediate cases
                     $baseConfidence = 0.7;
                 } else {
                     $doorState = 'closed';
+                    $certainty = 'UNCERTAIN'; // Low certainty for intermediate cases
                     $baseConfidence = 0.6;
                 }
                 $confidence = min(0.95, $baseConfidence * $signalClarity);
@@ -148,10 +233,15 @@ class DoorDetectionService
             ]);
         }
         
+        // Determine if confirmation is needed
+        $needsConfirmation = ($certainty === 'PROBABLE' && $doorState === 'probably_opened') || $certainty === 'UNCERTAIN';
+        
         // Return comprehensive result
         return [
             'door_state' => $doorState,
             'confidence' => min(95.0, $confidence * 100), // Cap at 95% as per requirements
+            'certainty' => $certainty,
+            'needs_confirmation' => $needsConfirmation,
             'opening_type' => $openingType,
             'raw_state' => $doorState,
             'processing_time_ms' => $processingTime,
@@ -882,6 +972,57 @@ class DoorDetectionService
             'samples' => count($history),
             'state_changes' => $stateChanges,
         ];
+    }
+    
+    /**
+     * Update dynamic calibration with weighted average
+     * 90% old value, 10% new value to slowly adapt to sensor drift
+     */
+    private function updateDynamicCalibration(string $sensorId, array $newPosition): void
+    {
+        try {
+            $sensor = \App\Models\Sensor::find($sensorId);
+            if (!$sensor || !$sensor->calibration_data) {
+                return; // No sensor or calibration data to update
+            }
+            
+            $calibrationData = $sensor->calibration_data;
+            $oldRef = $calibrationData['door_position']['closed_reference'];
+            
+            // Weighted average: 90% old, 10% new
+            $newRef = [
+                'x' => round($oldRef['x'] * 0.9 + $newPosition['x'] * 0.1, 2),
+                'y' => round($oldRef['y'] * 0.9 + $newPosition['y'] * 0.1, 2),
+                'z' => round($oldRef['z'] * 0.9 + $newPosition['z'] * 0.1, 2)
+            ];
+            
+            // Only update if the change is small enough (prevent sudden calibration jumps)
+            $maxChange = max(
+                abs($newRef['x'] - $oldRef['x']),
+                abs($newRef['y'] - $oldRef['y']),
+                abs($newRef['z'] - $oldRef['z'])
+            );
+            
+            if ($maxChange <= 0.5) { // Only allow small adjustments
+                $calibrationData['door_position']['closed_reference'] = $newRef;
+                $calibrationData['door_position']['last_updated'] = now()->toISOString();
+                
+                $sensor->calibration_data = $calibrationData;
+                $sensor->save();
+                
+                Log::debug("Dynamic calibration updated", [
+                    'sensor_id' => $sensorId,
+                    'old_reference' => $oldRef,
+                    'new_reference' => $newRef,
+                    'max_change' => $maxChange
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::error("Failed to update dynamic calibration", [
+                'sensor_id' => $sensorId,
+                'error' => $e->getMessage()
+            ]);
+        }
     }
     
     /**

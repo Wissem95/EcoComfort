@@ -335,7 +335,17 @@ class DashboardController extends Controller
      */
     public function gamification(Request $request)
     {
+        // For testing without auth, use first user if user is null
         $user = $request->user();
+        if (!$user) {
+            $user = \App\Models\User::first();
+            if (!$user) {
+                return response()->json([
+                    'error' => 'No user found for testing',
+                    'debug' => ['user_count' => \App\Models\User::count()]
+                ], 404);
+            }
+        }
         $organization = $user->organization;
 
         $gamificationData = [

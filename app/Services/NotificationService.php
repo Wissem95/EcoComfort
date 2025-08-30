@@ -298,10 +298,17 @@ class NotificationService
      */
     private function calculateTemperatureCostImpact(float $deviation, float $surfaceM2): float
     {
-        // Rough estimation: 50W per m² per degree deviation
-        $extraWatts = $deviation * $surfaceM2 * 50;
-        $dailyKwh = ($extraWatts * 24) / 1000;
-        return $dailyKwh * config('energy.price_per_kwh', 0.15);
+        // More realistic estimation: 20W per m² per degree deviation (reduced from 50W)
+        // This represents the extra HVAC energy needed to compensate
+        $extraWatts = $deviation * $surfaceM2 * 20;
+        
+        // Calculate cost per HOUR instead of per day (much more realistic)
+        $hourlyKwh = $extraWatts / 1000; // Convert W to kW for 1 hour
+        
+        // Use EDF tariff (0.1740 €/kWh) instead of config value
+        $hourlyCost = $hourlyKwh * 0.1740;
+        
+        return round($hourlyCost, 4); // Return cost per hour of this temperature deviation
     }
     
     /**
@@ -310,11 +317,15 @@ class NotificationService
     private function calculateHumidityCostImpact(float $deviation, float $surfaceM2): float
     {
         // Humidity affects HVAC efficiency - rough estimation
-        $efficiencyLoss = min(0.3, $deviation / 100); // Max 30% efficiency loss
-        $baseWatts = $surfaceM2 * 30; // 30W per m² base HVAC
+        $efficiencyLoss = min(0.2, $deviation / 100); // Max 20% efficiency loss (reduced)
+        $baseWatts = $surfaceM2 * 15; // 15W per m² base HVAC (reduced from 30W)
         $extraWatts = $baseWatts * $efficiencyLoss;
-        $dailyKwh = ($extraWatts * 24) / 1000;
-        return $dailyKwh * config('energy.price_per_kwh', 0.15);
+        
+        // Calculate cost per HOUR instead of per day
+        $hourlyKwh = $extraWatts / 1000; // Convert W to kW for 1 hour
+        $hourlyCost = $hourlyKwh * 0.1740; // Use EDF tariff
+        
+        return round($hourlyCost, 4); // Return cost per hour
     }
     
     /**
